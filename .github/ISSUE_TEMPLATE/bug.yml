@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible OmaJDownLoad problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste passwords, session tokens, device IDs, or download URLs.
+  - type: input
+    id: version
+    attributes:
+      label: OmaJDownLoad version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: omarchy
+    attributes:
+      label: Omarchy version
+      placeholder: 4.0.1
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
