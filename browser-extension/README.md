@@ -39,9 +39,9 @@ This creates separate Chromium and Firefox ZIP files in `dist/`.
 
 ## Chromium development install
 
-Open `chrome://extensions`, enable developer mode, choose **Load unpacked**,
-and select the `browser-extension` directory. For publication, upload the
-Chromium ZIP created by the build script.
+Build the packages, extract the Chromium ZIP, then open `chrome://extensions`,
+enable developer mode, choose **Load unpacked**, and select the extracted
+directory. For publication, upload the Chromium ZIP created by the build script.
 
 ## Firefox development install
 

@@ -32,7 +32,7 @@ for target in chromium firefox; do
   cp "$source_dir/icons/icon-128.png" "$build_root/$target/icons/"
 done
 
-cp "$source_dir/manifest.json" "$build_root/chromium/manifest.json"
+cp "$source_dir/manifest.chromium.json" "$build_root/chromium/manifest.json"
 cp "$source_dir/manifest.firefox.json" "$build_root/firefox/manifest.json"
 
 find "$build_root/chromium" "$build_root/firefox" -type d -exec chmod 0755 {} +

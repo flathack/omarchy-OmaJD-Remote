@@ -32,7 +32,7 @@ def has_unreleased_entries(changelog: str) -> bool:
 def verify(tag: str = "") -> str:
     versions = {
         manifest_version(PROJECT / "manifest.json"),
-        manifest_version(PROJECT / "browser-extension" / "manifest.json"),
+        manifest_version(PROJECT / "browser-extension" / "manifest.chromium.json"),
         manifest_version(PROJECT / "browser-extension" / "manifest.firefox.json"),
     }
     if len(versions) != 1:

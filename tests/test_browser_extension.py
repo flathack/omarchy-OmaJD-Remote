@@ -9,7 +9,7 @@ EXTENSION = PROJECT / "browser-extension"
 
 class BrowserExtensionTests(unittest.TestCase):
     def test_manifests_are_minimally_scoped(self):
-        for filename in ("manifest.json", "manifest.firefox.json"):
+        for filename in ("manifest.chromium.json", "manifest.firefox.json"):
             manifest = json.loads((EXTENSION / filename).read_text(encoding="utf-8"))
             permissions = manifest.get("host_permissions", [])
             self.assertNotIn("<all_urls>", permissions)
@@ -35,7 +35,7 @@ class BrowserExtensionTests(unittest.TestCase):
         self.assertIn("websiteContent", checklist)
 
     def test_manifest_files_exist(self):
-        manifest = json.loads((EXTENSION / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((EXTENSION / "manifest.chromium.json").read_text(encoding="utf-8"))
         referenced = {
             *manifest["background"].get("scripts", []),
             manifest["background"].get("service_worker", ""),

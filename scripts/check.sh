@@ -7,7 +7,7 @@ cd "$project_dir"
 python_bin="${PYTHON_BIN:-python}"
 
 "$python_bin" -m json.tool manifest.json >/dev/null
-"$python_bin" -m json.tool browser-extension/manifest.json >/dev/null
+"$python_bin" -m json.tool browser-extension/manifest.chromium.json >/dev/null
 "$python_bin" -m json.tool browser-extension/manifest.firefox.json >/dev/null
 diff -u \
   <(sort requirements.txt) \
