@@ -114,7 +114,12 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
         firefox = FirefoxOptions()
         firefox.accept_insecure_certs = True
         firefox.add_argument("-headless")
-        driver = webdriver.Firefox(options=firefox)
+        display = os.environ.pop("DISPLAY", None)
+        try:
+            driver = webdriver.Firefox(options=firefox)
+        finally:
+            if display is not None:
+                os.environ["DISPLAY"] = display
         package = PROJECT / "dist" / "omajdownload-clicknload-firefox.zip"
         driver.install_addon(str(package), temporary=True)
         yield "firefox", driver

@@ -8,6 +8,7 @@ import select
 import subprocess
 import sys
 import unittest
+from http import client
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest import mock
@@ -301,11 +302,14 @@ class ClickNLoadTests(unittest.TestCase):
         server.start()
         self.addCleanup(server.stop)
         endpoint = f"http://127.0.0.1:{server.port}/flash/add"
-        oversized = request.Request(endpoint, data=b"x" * (jdctl.CNL_BODY_LIMIT + 1))
-        with self.assertRaises(error.HTTPError) as raised:
-            request.urlopen(oversized, timeout=3)
-        self.assertEqual(raised.exception.code, 413)
-        raised.exception.close()
+        connection = client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.putrequest("POST", "/flash/add")
+        connection.putheader("Content-Length", str(jdctl.CNL_BODY_LIMIT + 1))
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 413)
+        response.close()
+        connection.close()
         body = parse.urlencode({"urls": "https://example.test/file"}).encode()
         with self.assertRaises(error.HTTPError) as raised:
             request.urlopen(request.Request(endpoint, data=body), timeout=3)
