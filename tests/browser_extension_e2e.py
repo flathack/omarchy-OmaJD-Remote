@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unittest
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -106,13 +107,18 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
     def browsers(self):
         requested = os.environ.get("OMAJDOWNLOAD_E2E_BROWSER", "")
         if requested in ("", "chromium"):
+            extension_dir = self.root / "chromium-extension"
+            extension_dir.mkdir(exist_ok=True)
+            package = PROJECT / "dist" / "omajd-remote-clicknload-chromium.zip"
+            with zipfile.ZipFile(package) as archive:
+                archive.extractall(extension_dir)
             chrome = ChromeOptions()
             chrome.add_argument("--no-sandbox")
             chrome.add_argument("--disable-dev-shm-usage")
             chrome.add_argument("--ignore-certificate-errors")
             if os.environ.get("OMAJDOWNLOAD_E2E_HEADLESS") == "1":
                 chrome.add_argument("--headless=new")
-            chrome.add_argument(f"--load-extension={PROJECT / 'browser-extension'}")
+            chrome.add_argument(f"--load-extension={extension_dir}")
             yield "chromium", webdriver.Chrome(options=chrome)
 
         if requested in ("", "firefox"):
