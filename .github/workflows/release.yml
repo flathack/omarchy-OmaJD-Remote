@@ -54,7 +54,8 @@ jobs:
           xvfb_pid=$!
           trap 'kill "$xvfb_pid"' EXIT
           OMAJDOWNLOAD_E2E_BROWSER=chromium DISPLAY=:99 /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
-          OMAJDOWNLOAD_E2E_BROWSER=firefox env -u DISPLAY /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
+          install -d -m 700 /tmp/firefox-home /tmp/firefox-runtime
+          OMAJDOWNLOAD_E2E_BROWSER=firefox env -u DISPLAY HOME=/tmp/firefox-home XDG_RUNTIME_DIR=/tmp/firefox-runtime /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
 
   release:
     needs: [qml-semantic, browser-e2e]
