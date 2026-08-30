@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 - Move compact playback controls to the top of the configured panel
 - Add inline LinkGrabber package renaming with keyboard save and cancel
 - Reduce the Add links editor to two visible lines with overflow scrolling
+- Prevent duplicate Click'n'Load submissions after uncertain remote outcomes and require an explicit retry
+- Show verified browser origin and destination hosts separately from untrusted website labels
+- Add authenticated browser-companion provenance and proactive JDownloader availability probes
+- Preserve `fetch(Request)` bodies and emulate form and XHR Click'n'Load transports more completely
+- Reset destructive confirmations on timeout, selection changes, refreshes, and panel close
+- Make account replacement and removal transactional across configuration and Secret Service
+- Quarantine malformed local state instead of silently overwriting it
+- Verify exact locked helper versions on every launch and prune superseded environments safely
+- Build browser-extension ZIPs from clean allowlisted contents
+- Require actual QML parsing and executable browser transport tests in CI
+- Document that dynamic JavaScript CNL2 keys are intentionally unsupported and never evaluated
 
 ## [0.3.0] - 2026-08-30
 

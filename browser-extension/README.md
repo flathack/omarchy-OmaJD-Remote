@@ -10,6 +10,15 @@ small relay scripts run on visited HTTP(S) pages. The service worker itself can
 only contact `127.0.0.1:9666` or `localhost:9666`, and only the two Click'n'Load
 POST paths are accepted. No page content or browsing history is stored.
 
+The companion also bridges the standard `/flash/` and `/jdcheck.js`
+availability probes. It authenticates the source-tab metadata to the local
+helper with an extension-only, short-lived loopback handshake so the panel can
+distinguish verified browser provenance from the untrusted CNL `source` field.
+
+Dynamic CNL2 `jk` programs are deliberately not evaluated. A CNL2 key must be
+a literal 32-character hexadecimal return value; this keeps website code out
+of the privileged extension and Python helper contexts.
+
 ## Build packages
 
 ```bash

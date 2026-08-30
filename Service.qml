@@ -142,6 +142,13 @@ Item {
             autostart: autostart === true
         });
     }
+    function retryClickNLoad(id, autostart) {
+        send({
+            command: "cnl_retry",
+            id: String(id || ""),
+            autostart: autostart === true
+        });
+    }
     function rejectClickNLoad(id) {
         send({
             command: "cnl_reject",

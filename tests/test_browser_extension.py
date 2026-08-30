@@ -34,9 +34,11 @@ class BrowserExtensionTests(unittest.TestCase):
 
     def test_service_worker_accepts_only_loopback_clicknload(self):
         source = (EXTENSION / "service-worker.js").read_text(encoding="utf-8")
-        self.assertIn('url.protocol === "http:"', source)
-        self.assertIn('url.port === "9666"', source)
+        self.assertIn('url.protocol !== "http:"', source)
+        self.assertIn('url.port !== "9666"', source)
         self.assertIn('url.pathname === "/flash/add"', source)
+        self.assertIn('url.pathname === "/jdcheck.js"', source)
+        self.assertIn("/omajdownload/extension-token", source)
         self.assertIn("CNL_LIMIT = 1024 * 1024", source)
 
 

@@ -21,12 +21,17 @@ function showFailure(message) {
 window.addEventListener("message", event => {
   if (event.source !== window || !event.data || event.data.marker !== REQUEST_MARKER) return;
   const request = event.data;
-  chrome.runtime.sendMessage({ type: "omajdownload-cnl", url: request.url, body: request.body }, response => {
+  chrome.runtime.sendMessage({
+    type: "omajdownload-cnl",
+    url: request.url,
+    method: request.method,
+    body: request.body
+  }, response => {
     const runtimeError = chrome.runtime.lastError;
     const result = runtimeError
       ? { ok: false, status: 0, message: runtimeError.message }
       : (response || { ok: false, status: 0, message: "No response from browser extension" });
     window.postMessage({ marker: RESPONSE_MARKER, id: request.id, ...result }, "*");
-    if (!result.ok) showFailure(result.message || `Click'n'Load failed (${result.status})`);
+    if (!result.ok && request.probe !== true) showFailure(result.message || `Click'n'Load failed (${result.status})`);
   });
 });

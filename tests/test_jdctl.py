@@ -186,6 +186,40 @@ class ClickNLoadTests(unittest.TestCase):
         with request.urlopen(f"{base}/jdcheck.js", timeout=3) as response:
             self.assertEqual(response.read(), b"jdownloader=true;")
 
+    def test_http_records_browser_origin_and_requires_token_for_extension_origin(self):
+        admitted = []
+        server = jdctl.ClickNLoadServer(admitted.append, queue.Queue(), port=0)
+        server.start()
+        self.addCleanup(server.stop)
+        base = f"http://127.0.0.1:{server.port}"
+        body = parse.urlencode({"urls": "https://files.example/file", "source": "https://claimed.example/post"}).encode()
+        request.urlopen(request.Request(
+            f"{base}/flash/add", data=body, headers={"Origin": "https://actual.example"}
+        ), timeout=3).close()
+        self.assertEqual(admitted[-1]["origin"], "https://actual.example")
+        self.assertTrue(admitted[-1]["origin_verified"])
+        self.assertEqual(admitted[-1]["claimed_source"], "https://claimed.example/post")
+
+        request.urlopen(request.Request(
+            f"{base}/flash/add", data=body,
+            headers={"X-OmaJDownLoad-Origin": "https://spoofed.example"},
+        ), timeout=3).close()
+        self.assertEqual(admitted[-1]["origin"], "")
+        self.assertFalse(admitted[-1]["origin_verified"])
+
+        with request.urlopen(f"{base}/omajdownload/extension-token", timeout=3) as response:
+            token = response.read().decode()
+            self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+        request.urlopen(request.Request(
+            f"{base}/flash/add", data=body,
+            headers={
+                "X-OmaJDownLoad-Origin": "https://extension-source.example/page",
+                "X-OmaJDownLoad-Token": token,
+            },
+        ), timeout=3).close()
+        self.assertEqual(admitted[-1]["origin"], "https://extension-source.example")
+        self.assertTrue(admitted[-1]["origin_verified"])
+
     def test_http_size_limit_and_capacity_response(self):
         server = jdctl.ClickNLoadServer(
             lambda _payload: (_ for _ in ()).throw(OverflowError("inbox full")),
@@ -362,15 +396,105 @@ class BridgeTests(unittest.TestCase):
                 second = jdctl.Bridge(start_cnl=False)
             self.assertEqual(second.inbox[0]["links"], ["https://example.test/persisted"])
 
+    def test_cnl_review_separates_verified_origin_claim_and_private_url_details(self):
+        bridge = self.make_bridge()
+        bridge.inbox = [{
+            "id": "review-1",
+            "links": ["https://cdn.example/private/file?token=secret"],
+            "claimed_source": "https://trusted.example/misleading/path",
+            "origin": "https://actual.example",
+            "origin_verified": True,
+        }]
+        view = bridge.inbox_view()[0]
+        self.assertEqual(view["origin"], "https://actual.example")
+        self.assertTrue(view["origin_verified"])
+        self.assertEqual(view["source"], "trusted.example")
+        self.assertEqual(view["link_hosts"], ["cdn.example"])
+        self.assertNotIn("secret", " ".join(view["link_hosts"]))
+        self.assertEqual(view["link_urls"], ["https://cdn.example/private/file?token=secret"])
+
+    def test_corrupt_inbox_is_quarantined_before_new_admission(self):
+        with TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            inbox_file = config_dir / "inbox.json"
+            inbox_file.write_text("not-json", encoding="utf-8")
+            with mock.patch("jdctl.CONFIG_DIR", config_dir), \
+                    mock.patch("jdctl.CONFIG_FILE", config_dir / "config.json"), \
+                    mock.patch("jdctl.INBOX_FILE", inbox_file):
+                bridge = jdctl.Bridge(start_cnl=False)
+                self.assertIn("preserved as", bridge.state_warning)
+                backups = list(config_dir.glob("inbox.json.corrupt-*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
+                bridge.admit_cnl({"links": ["https://new.example/file"]})
+                self.assertEqual(jdctl.read_inbox()[0]["links"], ["https://new.example/file"])
+
+    def test_corrupt_config_is_quarantined_before_reconfiguration(self):
+        with TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            config_file = config_dir / "config.json"
+            config_file.write_text("[not-an-object]", encoding="utf-8")
+            with mock.patch("jdctl.CONFIG_DIR", config_dir), \
+                    mock.patch("jdctl.CONFIG_FILE", config_file), \
+                    mock.patch("jdctl.INBOX_FILE", config_dir / "inbox.json"):
+                bridge = jdctl.Bridge(start_cnl=False)
+                self.assertEqual(bridge.config, {})
+                self.assertIn("preserved as", bridge.state_warning)
+                backups = list(config_dir.glob("config.json.corrupt-*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_text(encoding="utf-8"), "[not-an-object]")
+                bridge.persist_config({"email": "new@example.test"})
+                self.assertEqual(jdctl.read_config()["email"], "new@example.test")
+
+    def test_wrong_inbox_type_is_preserved_and_failed_quarantine_blocks_writes(self):
+        with TemporaryDirectory() as directory:
+            config_dir = Path(directory)
+            inbox_file = config_dir / "inbox.json"
+            inbox_file.write_text('{"unexpected": "object"}', encoding="utf-8")
+            with mock.patch("jdctl.CONFIG_DIR", config_dir), \
+                    mock.patch("jdctl.CONFIG_FILE", config_dir / "config.json"), \
+                    mock.patch("jdctl.INBOX_FILE", inbox_file), \
+                    mock.patch("jdctl.quarantine_state_file", side_effect=PermissionError("permission denied")):
+                bridge = jdctl.Bridge(start_cnl=False)
+                self.assertTrue(bridge.inbox_write_blocked)
+                self.assertIn("could not preserve it", bridge.state_warning)
+                with self.assertRaisesRegex(OSError, "locked to preserve"):
+                    bridge.admit_cnl({"links": ["https://new.example/file"]})
+                self.assertEqual(inbox_file.read_text(encoding="utf-8"), '{"unexpected": "object"}')
+
     @mock.patch("jdctl.emit")
-    def test_forget_reports_config_removal_failure(self, emit):
+    def test_cnl_uncertain_state_requires_explicit_retry(self, emit):
         bridge = self.make_bridge()
         bridge.config = {"email": "me@example.com"}
-        with mock.patch("jdctl.secret_clear"), mock.patch.object(Path, "unlink", side_effect=OSError("read-only")), mock.patch.object(bridge, "snapshot"):
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        bridge.device = bridge.jd.device_objects["device-1"]
+        bridge.inbox = [{"id": "cnl-1", "links": ["https://example.test/cnl"], "status": jdctl.CNL_PENDING}]
+        with mock.patch.object(bridge, "persist_inbox", side_effect=[None, OSError("disk full"), None]), \
+                mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
+            bridge.handle({"command": "cnl_accept", "id": "cnl-1", "autostart": False})
+        self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 1)
+        self.assertEqual(bridge.inbox[0]["status"], jdctl.CNL_UNCERTAIN)
+
+        with mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
+            bridge.handle({"command": "cnl_accept", "id": "cnl-1", "autostart": False})
+        self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 1)
+        self.assertIn("explicit submit-again", emit.call_args.args[0]["message"])
+
+        with mock.patch.object(bridge, "persist_inbox"), mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
+            bridge.handle({"command": "cnl_retry", "id": "cnl-1", "autostart": False})
+        self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 2)
+        self.assertEqual(bridge.inbox, [])
+
+    @mock.patch("jdctl.emit")
+    def test_forget_keeps_account_removed_when_empty_config_unlink_fails(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        with mock.patch("jdctl.secret_clear"), mock.patch("jdctl.write_config"), mock.patch.object(Path, "unlink", side_effect=OSError("read-only")), mock.patch.object(bridge, "snapshot"):
             bridge.handle({"command": "forget"})
         action = emit.call_args.args[0]
-        self.assertFalse(action["ok"])
+        self.assertTrue(action["ok"])
         self.assertIn("read-only", action["message"])
+        self.assertEqual(bridge.config, {})
 
     @mock.patch("jdctl.emit")
     def test_cnl_reject_reports_persistence_failure_without_mutating_inbox(self, emit):
@@ -443,6 +567,7 @@ class BridgeTests(unittest.TestCase):
         bridge = self.make_bridge()
         api = FakeApi([])
         with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
+                mock.patch("jdctl.secret_lookup", return_value=""), \
                 mock.patch("jdctl.secret_store") as store, \
                 mock.patch("jdctl.secret_clear") as clear, \
                 mock.patch("jdctl.write_config") as write, \
@@ -457,6 +582,63 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(unlink.call_count, 2)
             self.assertEqual(bridge.config, {})
             self.assertGreaterEqual(clear.call_count, 2)
+
+    @mock.patch("jdctl.emit")
+    def test_configure_succeeds_with_warning_when_old_secret_cleanup_fails(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "old@example.com"}
+        api = FakeApi([])
+        with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
+                mock.patch("jdctl.secret_lookup", return_value=""), \
+                mock.patch("jdctl.secret_store"), \
+                mock.patch("jdctl.secret_clear", side_effect=RuntimeError("locked")), \
+                mock.patch("jdctl.write_config"), mock.patch.object(bridge, "snapshot"):
+            bridge.handle({"command": "configure", "email": "new@example.com", "password": "secret"})
+        action = emit.call_args.args[0]
+        self.assertTrue(action["ok"])
+        self.assertIn("old credential could not be removed", action["message"])
+        self.assertEqual(bridge.email, "new@example.com")
+
+    @mock.patch("jdctl.emit")
+    def test_configure_rolls_back_new_secret_when_config_commit_fails(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "old@example.com"}
+        api = FakeApi([])
+        with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
+                mock.patch("jdctl.secret_lookup", return_value=""), \
+                mock.patch("jdctl.secret_store") as store, \
+                mock.patch("jdctl.secret_clear") as clear, \
+                mock.patch("jdctl.write_config", side_effect=OSError("read-only")):
+            bridge.handle({"command": "configure", "email": "new@example.com", "password": "secret"})
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertEqual(bridge.email, "old@example.com")
+        store.assert_called_once_with("new@example.com", "secret")
+        clear.assert_called_once_with("new@example.com")
+
+    @mock.patch("jdctl.emit")
+    def test_forget_restores_config_when_secret_removal_fails(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com", "selected_device_id": "one"}
+        writes = []
+        with mock.patch("jdctl.write_config", side_effect=lambda data: writes.append(dict(data))), \
+                mock.patch("jdctl.secret_clear", side_effect=RuntimeError("keyring locked")), \
+                mock.patch.object(bridge, "snapshot"):
+            bridge.handle({"command": "forget"})
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertEqual(writes, [{}, {"email": "me@example.com", "selected_device_id": "one"}])
+        self.assertEqual(bridge.email, "me@example.com")
+
+    @mock.patch("jdctl.emit")
+    def test_forget_does_not_claim_old_config_when_rollback_fails(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        with mock.patch("jdctl.write_config", side_effect=[None, OSError("rollback blocked")]), \
+                mock.patch("jdctl.secret_clear", side_effect=RuntimeError("keyring locked")), \
+                mock.patch.object(bridge, "snapshot"):
+            bridge.handle({"command": "forget"})
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertIn("configuration rollback failed", emit.call_args.args[0]["message"])
+        self.assertEqual(bridge.config, {})
 
 
 class ProcessProtocolTests(unittest.TestCase):

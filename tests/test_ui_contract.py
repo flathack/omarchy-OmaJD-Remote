@@ -30,6 +30,24 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("Keys.onEscapePressed: packageRow.finishRename(false)", self.widget)
         self.assertIn("function renameGrabberPackage(uuid, name)", self.service)
 
+    def test_destructive_confirmations_are_reset_and_timed(self):
+        self.assertIn("function resetDestructiveState()", self.widget)
+        self.assertIn("interval: 10000", self.widget)
+        self.assertIn("onSelectedDeviceIdChanged", self.widget)
+
+    def test_ci_requires_qml_tools(self):
+        workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("qt6-declarative-dev-tools", workflow)
+        self.assertIn("REQUIRE_QML_TOOLS=1", workflow)
+        self.assertIn("REQUIRE_BROWSER_TESTS=1", workflow)
+
+    def test_clicknload_review_exposes_provenance_and_destinations(self):
+        self.assertIn("origin_verified", self.widget)
+        self.assertIn("Destinations · ", self.widget)
+        self.assertIn("Show full download URLs", self.widget)
+        self.assertIn("link_urls", self.widget)
+        self.assertIn("Previous submission may already have reached JDownloader", self.widget)
+
 
 if __name__ == "__main__":
     unittest.main()

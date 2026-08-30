@@ -45,7 +45,12 @@ omarchy plugin add https://github.com/flathack/omarchy-OmaJdownLoad.git --enable
 
 Click the OmaJDownLoad icon in the bar, choose **Install helper**, then connect
 your MyJDownloader account. The helper is installed into an isolated virtual
-environment in the user profile; no system package is modified.
+environment in the user profile; no system package is modified. Every launch
+checks the installed distributions against the exact lock-file versions. A
+repair install switches environments atomically and retains only the newest
+rollback environment.
+Additional packages in that isolated environment are tolerated; every locked
+direct and transitive dependency must still be present at its exact version.
 
 You can also install the helper from a terminal:
 
@@ -82,12 +87,19 @@ Click'n'Load endpoints at `http://127.0.0.1:9666/flash/`, following the
 encrypted CNL2 requests are supported. Incoming links are not started silently:
 they appear in the panel first, where they can be sent to LinkGrabber, added and
 started, or dismissed. The current MyJDownloader device selection is used.
+Destination hostnames are shown by default; full URLs, including any embedded
+tokens, appear only after using the explicit reveal control.
+If the remote submission succeeds but its local acknowledgement cannot be
+saved, the request is marked **uncertain** and cannot be sent again without an
+explicit duplicate-risk confirmation.
 
 The listener is bound to loopback only, limits request size, and never executes
-JavaScript supplied by a website. CNL2 pages that generate their AES key through
-dynamic JavaScript can use the optional browser companion in
-[`browser-extension/`](browser-extension/README.md). It forwards the already
-constructed local request and leaves final approval in the panel inbox.
+JavaScript supplied by a website. The optional browser companion in
+[`browser-extension/`](browser-extension/README.md) bridges mixed-content and
+private-network restrictions while leaving final approval in the panel inbox.
+For safety and store compatibility, CNL2 `jk` functions that do more than return
+a literal 32-character hexadecimal key remain unsupported; the extension does
+not evaluate website-provided code.
 
 ## Security and local data
 
@@ -99,6 +111,10 @@ plugin. Review the source before enabling it.
 - Pending Click'n'Load inbox: `~/.config/omarchy/omajdownload/clicknload-inbox.json` (mode `0600`)
 - Python environment: `~/.local/share/omajdownload/venv`
 - API transport: encrypted MyJDownloader API over HTTPS
+
+Malformed configuration or inbox files are moved aside with a timestamped
+`.corrupt-*` suffix before fresh state is written, so their original content is
+available for recovery.
 
 The password is passed from QML to the long-lived helper over stdin. It never
 appears in process arguments, plugin settings, logs, or `shell.json`.

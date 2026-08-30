@@ -10,7 +10,9 @@ none may start a download without panel confirmation.
 | HTTPS | HTML form submit | Plain `urls` | Mixed-content restriction is bypassed by the companion; inbox entry appears |
 | HTTP and HTTPS | `fetch()` POST | Plain `urls` | Promise resolves only after listener HTTP success |
 | HTTP and HTTPS | `XMLHttpRequest` POST | Plain `urls` | `readystatechange`, `load`, and `loadend` report HTTP 200 |
+| HTTPS | Fetch/XHR availability probe | `/flash/` and `/jdcheck.js` | Companion reports availability only while the local listener responds |
 | HTTPS | form, Fetch, and XHR | CNL2 `jk` + `crypted` | Decrypted links appear in the review inbox |
+| Any | form, Fetch, and XHR | Dynamic JavaScript `jk` | Visible unsupported-key failure; no website code is evaluated |
 | Any | form, Fetch, and XHR | More than 1 MiB | Visible failure; no inbox entry |
 | Any | form, Fetch, and XHR | Listener stopped or inbox full | Visible failure; website is not told the request succeeded |
 

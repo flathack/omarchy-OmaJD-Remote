@@ -15,6 +15,10 @@ command -v zip >/dev/null || {
   echo "zip is required to package the browser extension." >&2
   exit 1
 }
+command -v unzip >/dev/null || {
+  echo "unzip is required to verify browser packages." >&2
+  exit 1
+}
 
 mkdir -p "$output_dir" "$build_root/chromium/icons" "$build_root/firefox/icons"
 
@@ -29,13 +33,34 @@ done
 cp "$source_dir/manifest.json" "$build_root/chromium/manifest.json"
 cp "$source_dir/manifest.firefox.json" "$build_root/firefox/manifest.json"
 
-(
-  cd "$build_root/chromium"
-  zip -qr "$output_dir/omajdownload-clicknload-chromium.zip" .
-)
-(
-  cd "$build_root/firefox"
-  zip -qr "$output_dir/omajdownload-clicknload-firefox.zip" .
-)
+expected_members=$'content-script.js\nicons/\nicons/icon-128.png\nicons/icon-48.png\nmanifest.json\npage-bridge.js\nservice-worker.js'
+
+package_target() {
+  local target="$1"
+  local destination="$output_dir/omajdownload-clicknload-$target.zip"
+  local built_archive="$build_root/omajdownload-clicknload-$target.zip"
+  local staged_archive="$output_dir/.omajdownload-clicknload-$target.$PPID.zip"
+
+  (
+    cd "$build_root/$target"
+    zip -qr "$built_archive" .
+  )
+  actual_members="$(unzip -Z1 "$built_archive" | sort)"
+  if [[ "$actual_members" != "$expected_members" ]]; then
+    echo "Unexpected files in $target browser package:" >&2
+    diff -u <(printf '%s\n' "$expected_members") <(printf '%s\n' "$actual_members") >&2 || true
+    exit 1
+  fi
+  cp "$built_archive" "$staged_archive"
+  mv -f "$staged_archive" "$destination"
+}
+
+cleanup_output() {
+  rm -f -- "$output_dir/.omajdownload-clicknload-chromium.$PPID.zip" "$output_dir/.omajdownload-clicknload-firefox.$PPID.zip"
+}
+trap 'cleanup_output; cleanup' EXIT
+
+package_target chromium
+package_target firefox
 
 echo "Browser packages created in $output_dir"

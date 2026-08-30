@@ -29,6 +29,7 @@ Panel {
 
     onOpenedChanged: {
         if (!opened) {
+            resetDestructiveState();
             keyboardHint = "";
             renameTarget = "";
             renameDraft = "";
@@ -111,6 +112,12 @@ Panel {
         keyCatcher.forceActiveFocus();
         keyboardHint = "Panel navigation";
         Qt.callLater(root.ensureFocusVisible);
+    }
+
+    function resetDestructiveState() {
+        removeTarget = "";
+        confirmForget = false;
+        destructiveReset.stop();
     }
 
     BarIconButton {
@@ -648,6 +655,7 @@ Panel {
                             onClicked: {
                                 if (!root.confirmForget) {
                                     root.confirmForget = true;
+                                    destructiveReset.restart();
                                 } else {
                                     root.backend.forgetAccount();
                                     root.confirmForget = false;
@@ -672,6 +680,25 @@ Panel {
                 linkInput.forceActiveFocus();
             root.pendingLinkRequest = "";
         }
+        function onSelectedDeviceIdChanged() {
+            root.resetDestructiveState();
+        }
+        function onConfiguredChanged() {
+            root.resetDestructiveState();
+        }
+        function onDownloadsChanged() {
+            root.removeTarget = "";
+        }
+        function onGrabberChanged() {
+            root.removeTarget = "";
+        }
+    }
+
+    Timer {
+        id: destructiveReset
+        interval: 10000
+        repeat: false
+        onTriggered: root.resetDestructiveState()
     }
 
     component PackageRow: BorderSurface {
@@ -828,6 +855,7 @@ Panel {
                             var key = (packageRow.grabber ? "g:" : "d:") + packageRow.uuid;
                             if (!packageRow.confirming) {
                                 root.removeTarget = key;
+                                destructiveReset.restart();
                                 return;
                             }
                             root.removeTarget = "";
@@ -866,6 +894,16 @@ Panel {
     component ClickNLoadRow: BorderSurface {
         id: cnlRow
         property var item: ({})
+        property bool linksExpanded: false
+        readonly property string submissionStatus: String(item.status || "pending")
+        readonly property bool uncertain: submissionStatus === "uncertain"
+        readonly property bool submitting: submissionStatus === "submitting"
+        readonly property string hostSummary: {
+            var hosts = item.link_hosts instanceof Array ? item.link_hosts : [];
+            var result = hosts.join(", ");
+            var hidden = Number(item.hidden_host_count || 0);
+            return result + (hidden > 0 ? " · +" + hidden + " more" : "");
+        }
 
         color: Style.normalFillFor(root.foreground, Color.accent)
         borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
@@ -891,7 +929,7 @@ Panel {
 
                     Text {
                         width: parent.width
-                        text: String(cnlRow.item.source || "Unknown website")
+                        text: cnlRow.item.origin_verified === true ? String(cnlRow.item.origin || "Verified browser page") : "Unverified Click'n'Load request"
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.body
@@ -900,11 +938,38 @@ Panel {
                     }
                     Text {
                         width: parent.width
-                        text: String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links") + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL") + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
+                        text: "Claims " + String(cnlRow.item.source || "unknown source") + " · " + String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links") + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL") + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
                         color: root.dim
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
+                    }
+                    Text {
+                        visible: cnlRow.hostSummary !== ""
+                        width: parent.width
+                        text: "Destinations · " + cnlRow.hostSummary
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        visible: cnlRow.linksExpanded
+                        width: parent.width
+                        text: cnlRow.item.link_urls instanceof Array ? cnlRow.item.link_urls.join("\n") : ""
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    Text {
+                        visible: cnlRow.uncertain || cnlRow.submitting
+                        width: parent.width
+                        text: cnlRow.uncertain ? "Previous submission may already have reached JDownloader" : "Submitting to JDownloader…"
+                        color: cnlRow.uncertain ? root.urgent : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
                     }
                 }
 
@@ -913,16 +978,36 @@ Panel {
                     spacing: Style.space(2)
 
                     ActionButton {
+                        visible: !cnlRow.submitting
+                        iconText: cnlRow.linksExpanded ? "󰈈" : "󰈉"
+                        tooltipText: cnlRow.linksExpanded ? "Hide full download URLs" : "Show full download URLs"
+                        foreground: root.dim
+                        onClicked: cnlRow.linksExpanded = !cnlRow.linksExpanded
+                    }
+
+                    ActionButton {
+                        visible: !cnlRow.submitting
                         iconText: "󰌷"
-                        tooltipText: "Send to LinkGrabber"
+                        tooltipText: cnlRow.uncertain ? "Submit again to LinkGrabber; may duplicate links" : "Send to LinkGrabber"
                         foreground: root.foreground
-                        onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), false)
+                        onClicked: {
+                            if (cnlRow.uncertain)
+                                root.backend.retryClickNLoad(String(cnlRow.item.id || ""), false);
+                            else
+                                root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), false);
+                        }
                     }
                     ActionButton {
+                        visible: !cnlRow.submitting
                         iconText: "󰐊"
-                        tooltipText: "Add and start"
+                        tooltipText: cnlRow.uncertain ? "Submit again and start; may duplicate downloads" : "Add and start"
                         foreground: root.foreground
-                        onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), true)
+                        onClicked: {
+                            if (cnlRow.uncertain)
+                                root.backend.retryClickNLoad(String(cnlRow.item.id || ""), true);
+                            else
+                                root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), true);
+                        }
                     }
                     ActionButton {
                         property bool destructiveAction: true
