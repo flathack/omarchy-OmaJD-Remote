@@ -22,6 +22,10 @@ Item {
   property var downloads: []
   property var grabber: []
   property int activeDownloads: 0
+  property bool cnlListening: false
+  property int cnlPort: 9666
+  property var cnlInbox: []
+  property string cnlError: ""
   property string lastError: ""
   property string actionStatus: ""
   property int revision: 0
@@ -55,6 +59,10 @@ Item {
   function moveGrabberPackage(uuid) { send({ command: "move_grabber", package_ids: [String(uuid)] }) }
   function removeDownloadPackage(uuid) { send({ command: "remove_downloads", package_ids: [String(uuid)] }) }
   function removeGrabberPackage(uuid) { send({ command: "remove_grabber", package_ids: [String(uuid)] }) }
+  function acceptClickNLoad(id, autostart) {
+    send({ command: "cnl_accept", id: String(id || ""), autostart: autostart === true })
+  }
+  function rejectClickNLoad(id) { send({ command: "cnl_reject", id: String(id || "") }) }
   function configure(email, password) {
     busy = true
     lastError = ""
@@ -105,6 +113,21 @@ Item {
       actionStatus = String(data.message || "")
       if (data.ok !== true) lastError = actionStatus || "JDownloader action failed"
       else lastError = ""
+      statusReset.restart()
+      return
+    }
+
+    if (data.type === "cnl") {
+      cnlListening = data.listening === true
+      cnlPort = Number(data.port || 9666)
+      cnlInbox = data.inbox instanceof Array ? data.inbox : []
+      cnlError = String(data.error || "")
+      revision++
+      return
+    }
+
+    if (data.type === "cnl_error") {
+      lastError = String(data.message || "Click'n'Load request could not be read")
       statusReset.restart()
       return
     }

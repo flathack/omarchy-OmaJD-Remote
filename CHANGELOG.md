@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+- Add a loopback-only Click'n'Load/CNL2 listener on port 9666
+- Add a review inbox with LinkGrabber, start, and dismiss actions
+- Persist pending requests privately and reject dynamic website JavaScript
+
 ## [0.1.0] - 2026-08-30
 
 ### Added

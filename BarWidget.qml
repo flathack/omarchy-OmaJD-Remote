@@ -48,6 +48,20 @@ Panel {
     }
   }
 
+  Rectangle {
+    visible: root.backend && root.backend.cnlInbox.length > 0
+    anchors.right: parent.right
+    anchors.top: parent.top
+    anchors.rightMargin: Style.space(1)
+    anchors.topMargin: Style.space(1)
+    width: Style.space(7)
+    height: width
+    radius: width / 2
+    color: Color.accent
+    border.width: 1
+    border.color: Color.background
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: button
@@ -184,6 +198,60 @@ Panel {
           visible: root.backend && root.backend.configured
           width: parent.width
           spacing: Style.space(12)
+
+          Column {
+            width: parent.width
+            spacing: Style.space(7)
+
+            PanelSectionHeader {
+              text: "CLICK'N'LOAD"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(7)
+
+              Rectangle {
+                width: Style.space(7)
+                height: width
+                radius: width / 2
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.backend && root.backend.cnlListening ? Color.accent : root.urgent
+              }
+
+              Text {
+                width: Math.max(0, parent.width - Style.space(14))
+                text: root.backend && root.backend.cnlListening
+                  ? "Ready on this computer · port " + root.backend.cnlPort
+                  : "Listener unavailable" + (root.backend && root.backend.cnlError !== "" ? " · " + root.backend.cnlError : "")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+
+            Text {
+              visible: root.backend && root.backend.cnlInbox.length === 0
+              width: parent.width
+              text: "Click'n'Load buttons will appear here before anything is sent to JDownloader."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.backend ? root.backend.cnlInbox : []
+              ClickNLoadRow {
+                required property var modelData
+                width: parent.width
+                item: modelData
+              }
+            }
+          }
 
           Column {
             visible: root.backend && root.backend.devices.length > 1
@@ -490,6 +558,80 @@ Panel {
           radius: parent.radius
           color: root.foreground
           Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        }
+      }
+    }
+  }
+
+  component ClickNLoadRow: BorderSurface {
+    id: cnlRow
+    property var item: ({})
+
+    color: Style.normalFillFor(root.foreground, Color.accent)
+    borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+    radius: Style.cornerRadius
+    implicitHeight: cnlContent.implicitHeight + Style.space(14)
+
+    Column {
+      id: cnlContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(9)
+      anchors.rightMargin: Style.space(7)
+      spacing: Style.space(5)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(6)
+
+        Column {
+          width: Math.max(0, parent.width - cnlActions.implicitWidth - Style.space(8))
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            text: String(cnlRow.item.source || "Unknown website")
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            elide: Text.ElideMiddle
+          }
+          Text {
+            width: parent.width
+            text: String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links")
+              + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL")
+              + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        Row {
+          id: cnlActions
+          spacing: Style.space(2)
+
+          Button {
+            iconText: "󰌷"
+            tooltipText: "Send to LinkGrabber"
+            foreground: root.foreground
+            onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), false)
+          }
+          Button {
+            iconText: "󰐊"
+            tooltipText: "Add and start"
+            foreground: root.foreground
+            onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), true)
+          }
+          Button {
+            iconText: "󰆴"
+            tooltipText: "Dismiss"
+            foreground: root.dim
+            onClicked: root.backend.rejectClickNLoad(String(cnlRow.item.id || ""))
+          }
         }
       }
     }

@@ -22,6 +22,8 @@ machine.
 - Starts, pauses, resumes, stops, and force-starts downloads
 - Shows package progress, transfer speed, and current controller state
 - Adds one or more URLs to LinkGrabber or directly to the download queue
+- Receives local Click'n'Load and encrypted CNL2 requests on `127.0.0.1:9666`
+- Keeps incoming Click'n'Load requests in a review inbox for the selected device
 - Moves or removes LinkGrabber packages
 - Removes download-list entries without deleting downloaded files
 - Uses a theme-aware vector mark with animated, paused, and offline states
@@ -62,6 +64,19 @@ The panel offers explicit controls for start, pause/resume, stop, force-start,
 LinkGrabber submission, queue movement, and removal. Removing a download entry
 keeps the downloaded file on disk.
 
+## Click'n'Load
+
+While the plugin helper is running, OmaJDownLoad provides the standard local
+Click'n'Load endpoints at `http://127.0.0.1:9666/flash/`, following the
+[JDownloader CNL2 protocol](https://jdownloader.org/knowledge/wiki/glossary/cnl2). Both plain CNL and
+encrypted CNL2 requests are supported. Incoming links are not started silently:
+they appear in the panel first, where they can be sent to LinkGrabber, added and
+started, or dismissed. The current MyJDownloader device selection is used.
+
+The listener is bound to loopback only, limits request size, and never executes
+JavaScript supplied by a website. CNL2 pages that generate their AES key through
+dynamic JavaScript need the optional browser companion planned for a later release.
+
 ## Security and local data
 
 OmaJDownLoad runs inside the unsandboxed Omarchy shell, like every Omarchy
@@ -69,6 +84,7 @@ plugin. Review the source before enabling it.
 
 - Password: desktop Secret Service keyring
 - Non-secret settings: `~/.config/omarchy/omajdownload/config.json`
+- Pending Click'n'Load inbox: `~/.config/omarchy/omajdownload/clicknload-inbox.json` (mode `0600`)
 - Python environment: `~/.local/share/omajdownload/venv`
 - API transport: encrypted MyJDownloader API over HTTPS
 
