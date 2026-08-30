@@ -20,6 +20,20 @@ class BrowserExtensionTests(unittest.TestCase):
             self.assertEqual(manifest["manifest_version"], 3)
             self.assertEqual(manifest.get("permissions", []), [])
 
+        firefox = json.loads((EXTENSION / "manifest.firefox.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            firefox["browser_specific_settings"]["gecko"]["data_collection_permissions"]["required"],
+            ["websiteActivity", "websiteContent"],
+        )
+
+    def test_store_privacy_documents_cover_local_data_flow(self):
+        privacy = (PROJECT / "PRIVACY.md").read_text(encoding="utf-8")
+        checklist = (EXTENSION / "STORE_SUBMISSION.md").read_text(encoding="utf-8")
+        for required in ("source page URL", "Click'n'Load form fields", "127.0.0.1:9666", "does not persist"):
+            self.assertIn(required, privacy)
+        self.assertIn("websiteActivity", checklist)
+        self.assertIn("websiteContent", checklist)
+
     def test_manifest_files_exist(self):
         manifest = json.loads((EXTENSION / "manifest.json").read_text(encoding="utf-8"))
         referenced = {

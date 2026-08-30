@@ -14,9 +14,11 @@ Panel {
     property bool confirmForget: false
     property string keyboardHint: ""
     property string pendingLinkRequest: ""
+    property string pendingRenameRequest: ""
     property string renameTarget: ""
     property string renameDraft: ""
     property bool renameEditorFocused: false
+    property string cnlRejectTarget: ""
     property Item focusedControl: null
     readonly property var backend: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
     readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -62,9 +64,14 @@ Panel {
         if (!opened) {
             resetDestructiveState();
             keyboardHint = "";
-            renameTarget = "";
-            renameDraft = "";
-            renameEditorFocused = false;
+            if (!backend || !backend.renameBusy) {
+                renameTarget = "";
+                renameDraft = "";
+                renameEditorFocused = false;
+                pendingRenameRequest = "";
+            }
+            if (backend)
+                backend.clearClickNLoadDetails();
             focusedControl = null;
             return;
         }
@@ -147,6 +154,7 @@ Panel {
 
     function resetDestructiveState() {
         removeTarget = "";
+        cnlRejectTarget = "";
         confirmForget = false;
         destructiveReset.stop();
     }
@@ -673,12 +681,12 @@ Panel {
                         }
 
                         PanelSeparator {
-                            visible: root.backend && root.backend.downloads.length > 0
+                            visible: root.backend && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
                             foreground: root.foreground
                         }
 
                         Column {
-                            visible: root.backend && root.backend.downloads.length > 0
+                            visible: root.backend && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -710,12 +718,12 @@ Panel {
                         }
 
                         PanelSeparator {
-                            visible: root.backend && root.backend.grabber.length > 0
+                            visible: root.backend && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
                             foreground: root.foreground
                         }
 
                         Column {
-                            visible: root.backend && root.backend.grabber.length > 0
+                            visible: root.backend && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -787,6 +795,22 @@ Panel {
             }
             root.pendingLinkRequest = "";
         }
+        function onRenameFinished(requestId, ok) {
+            if (requestId === "" || requestId !== root.pendingRenameRequest)
+                return;
+            root.pendingRenameRequest = "";
+            if (ok) {
+                root.renameTarget = "";
+                root.renameDraft = "";
+                root.renameEditorFocused = false;
+                root.keyboardHint = "LinkGrabber package renamed";
+                keyCatcher.forceActiveFocus();
+                Qt.callLater(function () { root.moveTabFocus(1); });
+            } else {
+                root.keyboardHint = "Rename failed · edit the preserved name and try again";
+                Qt.callLater(root.restoreRenameFocus);
+            }
+        }
         function onSelectedDeviceIdChanged() {
             root.resetDestructiveState();
         }
@@ -800,6 +824,12 @@ Panel {
             root.removeTarget = "";
             if (root.renameTarget !== "")
                 Qt.callLater(root.restoreRenameFocus);
+        }
+        function onCnlInboxChanged() {
+            if (root.cnlRejectTarget !== "" && !root.backend.cnlInbox.some(function (item) {
+                return String(item.id || "") === root.cnlRejectTarget;
+            }))
+                root.cnlRejectTarget = "";
         }
     }
 
@@ -817,6 +847,7 @@ Panel {
         readonly property string uuid: String(item.uuid || "")
         readonly property bool confirming: root.removeTarget === (grabber ? "g:" : "d:") + uuid
         readonly property bool editingName: grabber && root.renameTarget === uuid
+        readonly property bool renamePending: editingName && root.pendingRenameRequest !== ""
 
         function beginRename() {
             root.removeTarget = "";
@@ -841,8 +872,16 @@ Panel {
                 renameField.forceActiveFocus();
                 return;
             }
-            if (save && root.backend)
-                root.backend.renameGrabberPackage(packageRow.uuid, newName);
+            if (save && root.backend) {
+                root.pendingRenameRequest = root.backend.renameGrabberPackage(packageRow.uuid, newName);
+                if (root.pendingRenameRequest !== "") {
+                    root.keyboardHint = "Renaming LinkGrabber package…";
+                    return;
+                }
+                root.keyboardHint = "Rename could not be sent · name preserved";
+                renameField.forceActiveFocus();
+                return;
+            }
             root.renameTarget = "";
             root.renameDraft = "";
             root.renameEditorFocused = false;
@@ -886,6 +925,7 @@ Panel {
                     TextField {
                         id: renameField
                         visible: packageRow.editingName
+                        enabled: !packageRow.renamePending
                         width: parent.width
                         foreground: root.foreground
                         verticalPadding: Style.space(2)
@@ -951,7 +991,7 @@ Panel {
                         tooltipText: "Save package name"
                         foreground: root.foreground
                         bordered: true
-                        enabled: String(root.renameDraft || "").trim() !== ""
+                        enabled: !packageRow.renamePending && String(root.renameDraft || "").trim() !== ""
                         onClicked: packageRow.finishRename(true)
                     }
                     ActionButton {
@@ -959,6 +999,7 @@ Panel {
                         iconText: "󰅖"
                         tooltipText: "Cancel rename"
                         foreground: root.dim
+                        enabled: !packageRow.renamePending
                         onClicked: packageRow.finishRename(false)
                     }
                     ActionButton {
@@ -1010,7 +1051,9 @@ Panel {
     component ClickNLoadRow: BorderSurface {
         id: cnlRow
         property var item: ({})
-        property bool linksExpanded: false
+        readonly property string uuid: String(item.id || "")
+        readonly property bool linksExpanded: root.backend && root.backend.cnlExpandedId === uuid
+        readonly property bool confirmingDismiss: root.cnlRejectTarget === uuid
         readonly property string submissionStatus: String(item.status || "pending")
         readonly property bool uncertain: submissionStatus === "uncertain"
         readonly property bool submitting: submissionStatus === "submitting"
@@ -1099,11 +1142,10 @@ Panel {
                         tooltipText: cnlRow.linksExpanded ? "Hide full download URLs" : "Show full download URLs"
                         foreground: root.dim
                         onClicked: {
-                            cnlRow.linksExpanded = !cnlRow.linksExpanded;
                             if (cnlRow.linksExpanded)
-                                root.backend.requestClickNLoadDetails(String(cnlRow.item.id || ""));
-                            else if (root.backend.cnlDetailsId === String(cnlRow.item.id || ""))
                                 root.backend.clearClickNLoadDetails();
+                            else
+                                root.backend.requestClickNLoadDetails(cnlRow.uuid);
                         }
                     }
 
@@ -1113,6 +1155,7 @@ Panel {
                         tooltipText: cnlRow.uncertain ? "Submit again to LinkGrabber; may duplicate links" : "Send to LinkGrabber"
                         foreground: root.foreground
                         onClicked: {
+                            root.cnlRejectTarget = "";
                             if (cnlRow.uncertain)
                                 root.backend.retryClickNLoad(String(cnlRow.item.id || ""), false);
                             else
@@ -1125,6 +1168,7 @@ Panel {
                         tooltipText: cnlRow.uncertain ? "Submit again and start; may duplicate downloads" : "Add and start"
                         foreground: root.foreground
                         onClicked: {
+                            root.cnlRejectTarget = "";
                             if (cnlRow.uncertain)
                                 root.backend.retryClickNLoad(String(cnlRow.item.id || ""), true);
                             else
@@ -1133,10 +1177,19 @@ Panel {
                     }
                     ActionButton {
                         property bool destructiveAction: true
-                        iconText: "󰆴"
-                        tooltipText: "Dismiss"
-                        foreground: root.dim
-                        onClicked: root.backend.rejectClickNLoad(String(cnlRow.item.id || ""))
+                        iconText: cnlRow.confirmingDismiss ? "󰄬" : "󰆴"
+                        tooltipText: cnlRow.confirmingDismiss ? "Confirm dismiss" : "Dismiss Click'n'Load request"
+                        foreground: cnlRow.confirmingDismiss ? root.urgent : root.dim
+                        onClicked: {
+                            if (!cnlRow.confirmingDismiss) {
+                                root.removeTarget = "";
+                                root.cnlRejectTarget = cnlRow.uuid;
+                                destructiveReset.restart();
+                                return;
+                            }
+                            root.cnlRejectTarget = "";
+                            root.backend.rejectClickNLoad(cnlRow.uuid);
+                        }
                     }
                 }
             }

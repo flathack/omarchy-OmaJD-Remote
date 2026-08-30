@@ -40,7 +40,10 @@ Item {
     property string addLinksRetryToken: ""
     property string uncertainAddLinksText: ""
     property bool uncertainAddLinksAutostart: false
+    property bool renameBusy: false
+    property string pendingRenameRequest: ""
     property string cnlDetailsId: ""
+    property string cnlExpandedId: ""
     property var cnlDetailsUrls: []
     property int cnlDetailsHiddenCount: 0
     property int requestSequence: 0
@@ -52,6 +55,7 @@ Item {
     property double daemonStartedAt: 0
 
     signal addLinksFinished(string requestId, bool ok, bool uncertain)
+    signal renameFinished(string requestId, bool ok)
 
     readonly property bool paused: controllerState.toUpperCase().indexOf("PAUSE") !== -1
     readonly property bool running: connected && (activeDownloads > 0 || controllerState.toUpperCase().indexOf("RUN") !== -1)
@@ -141,11 +145,27 @@ Item {
         });
     }
     function renameGrabberPackage(uuid, name) {
-        send({
+        if (renameBusy)
+            return "";
+        var requestId = "rename-" + (++requestSequence);
+        if (!send({
             command: "rename_grabber",
+            request_id: requestId,
             package_id: String(uuid),
             name: String(name || "")
-        });
+        }))
+            return "";
+        renameBusy = true;
+        pendingRenameRequest = requestId;
+        return requestId;
+    }
+    function failPendingRename() {
+        if (!renameBusy)
+            return;
+        var requestId = pendingRenameRequest;
+        renameBusy = false;
+        pendingRenameRequest = "";
+        renameFinished(requestId, false);
     }
     function removeDownloadPackage(uuid) {
         send({
@@ -180,12 +200,19 @@ Item {
         });
     }
     function requestClickNLoadDetails(id) {
-        send({
+        var itemId = String(id || "");
+        cnlExpandedId = itemId;
+        cnlDetailsId = "";
+        cnlDetailsUrls = [];
+        cnlDetailsHiddenCount = 0;
+        if (!send({
             command: "cnl_details",
-            id: String(id || "")
-        });
+            id: itemId
+        }))
+            clearClickNLoadDetails();
     }
     function clearClickNLoadDetails() {
+        cnlExpandedId = "";
         cnlDetailsId = "";
         cnlDetailsUrls = [];
         cnlDetailsHiddenCount = 0;
@@ -287,6 +314,13 @@ Item {
                 }
                 addLinksFinished(String(data.request_id || ""), lastActionOk, addLinksUncertain);
             }
+            if (String(data.command || "") === "rename_grabber"
+                    && String(data.request_id || "") === pendingRenameRequest) {
+                var renameRequestId = pendingRenameRequest;
+                renameBusy = false;
+                pendingRenameRequest = "";
+                renameFinished(renameRequestId, lastActionOk);
+            }
             statusReset.restart();
             return;
         }
@@ -295,8 +329,8 @@ Item {
             cnlListening = data.listening === true;
             cnlPort = Number(data.port || 9666);
             cnlInbox = data.inbox instanceof Array ? data.inbox : [];
-            if (cnlDetailsId !== "" && !cnlInbox.some(function (item) {
-                return String(item.id || "") === cnlDetailsId;
+            if (cnlExpandedId !== "" && !cnlInbox.some(function (item) {
+                return String(item.id || "") === cnlExpandedId;
             }))
                 clearClickNLoadDetails();
             cnlError = String(data.error || "");
@@ -305,6 +339,8 @@ Item {
         }
 
         if (data.type === "cnl_details") {
+            if (String(data.id || "") !== cnlExpandedId)
+                return;
             cnlDetailsId = String(data.id || "");
             cnlDetailsUrls = data.link_urls instanceof Array ? data.link_urls : [];
             cnlDetailsHiddenCount = Number(data.hidden_link_count || 0);
@@ -320,8 +356,12 @@ Item {
 
         if (data.type === "fatal") {
             failPendingAddLinks();
+            failPendingRename();
             busy = false;
             connected = false;
+            cnlListening = false;
+            cnlError = String(data.message || "JDownloader helper failed");
+            clearClickNLoadDetails();
             helperReady = false;
             helperMissing = String(data.code || "") === "helper_missing" || String(data.code || "") === "helper_outdated";
             helperOutdated = String(data.code || "") === "helper_outdated";
@@ -347,7 +387,11 @@ Item {
         }
         onExited: function (exitCode) {
             root.failPendingAddLinks();
+            root.failPendingRename();
             root.connected = false;
+            root.cnlListening = false;
+            root.cnlError = "JDownloader helper is not running";
+            root.clearClickNLoadDetails();
             if (exitCode !== 0 && root.lastError === "")
                 root.lastError = "JDownloader helper exited (" + exitCode + ")";
             if (root.helperMissing)

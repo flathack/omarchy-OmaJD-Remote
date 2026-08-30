@@ -204,12 +204,20 @@ class BrowserPackagingTests(unittest.TestCase):
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_release_versions_and_changelog_match(self):
-        self.assertEqual(verify_release.verify(), "0.4.0")
+        self.assertEqual(verify_release.verify(), "0.5.0")
 
     def test_release_tag_must_match_version(self):
-        self.assertEqual(verify_release.verify("v0.4.0"), "0.4.0")
+        self.assertEqual(verify_release.verify("v0.5.0"), "0.5.0")
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             verify_release.verify("v9.9.9")
+
+    def test_tagged_release_rejects_unreleased_entries(self):
+        self.assertFalse(verify_release.has_unreleased_entries(
+            "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n"
+        ))
+        self.assertTrue(verify_release.has_unreleased_entries(
+            "# Changelog\n\n## [Unreleased]\n\n- pending fix\n\n## [1.0.0] - 2026-01-01\n"
+        ))
 
 
 if __name__ == "__main__":

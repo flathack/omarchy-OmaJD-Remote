@@ -12,9 +12,9 @@
       if (url.port !== "9666") return null;
       const normalizedMethod = String(method || "GET").toUpperCase();
       if (normalizedMethod === "POST" && (url.pathname === "/flash/add" || url.pathname === "/flash/addcrypted2"))
-        return { url: url.href, method: "POST", probe: false };
+        return { url: url.href, path: url.pathname, method: "POST", probe: false };
       if (normalizedMethod === "GET" && (url.pathname.replace(/\/$/, "") === "/flash" || url.pathname === "/jdcheck.js"))
-        return { url: url.href, method: "GET", probe: true };
+        return { url: url.href, path: url.pathname, method: "GET", probe: true };
       return null;
     } catch (_error) {
       return null;
@@ -39,7 +39,9 @@
   }
 
   function forward(route, body, { signal = null, timeoutMs = 10000 } = {}) {
-    const id = `${Date.now()}-${++sequence}`;
+    const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}-${++sequence}`;
     if (signal && signal.aborted) return Promise.reject(abortError());
     return new Promise((resolve, reject) => {
       let timeout;
@@ -55,7 +57,8 @@
         reject(error);
       };
       const onAbort = () => cancel(abortError());
-      timeout = setTimeout(() => cancel(new TypeError("OmaJD-Remote did not answer")), timeoutMs);
+      if (timeoutMs > 0)
+        timeout = setTimeout(() => cancel(new TypeError("OmaJD-Remote did not answer")), timeoutMs);
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
       pending.set(id, {
         resolve(value) { cleanup(); resolve(value); },
@@ -100,7 +103,7 @@
     }
     return bodyPromise.then(body => forward(route, body, { signal })).then(result => new Response(result.body || "success\r\n", {
       status: result.status || 200,
-      headers: { "Content-Type": route.url.endsWith("jdcheck.js") ? "application/javascript" : "text/plain; charset=utf-8" }
+      headers: { "Content-Type": route.path === "/jdcheck.js" ? "application/javascript" : "text/plain; charset=utf-8" }
     }));
   };
 
@@ -172,7 +175,7 @@
         }, this.timeout);
       }
       this.dispatchEvent(new ProgressEvent("loadstart"));
-      forward(this.__omajRoute, body, { signal: this.__omajController.signal }).then(result => {
+      forward(this.__omajRoute, body, { signal: this.__omajController.signal, timeoutMs: 0 }).then(result => {
         if (timeout) clearTimeout(timeout);
         if (this.__omajFinished) return;
         this.__omajReadyState = 2;
@@ -220,7 +223,7 @@
   const bridgedScripts = new WeakSet();
   function bridgeProbeScript(script, value) {
     const route = cnlRoute(value, "GET");
-    if (!route || !route.url.endsWith("/jdcheck.js") || bridgedScripts.has(script)) return false;
+    if (!route || route.path !== "/jdcheck.js" || bridgedScripts.has(script)) return false;
     bridgedScripts.add(script);
     script.removeAttribute("src");
     forward(route, "").then(() => {

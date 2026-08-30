@@ -1,6 +1,17 @@
 const CNL_LIMIT = 1024 * 1024;
 const controllers = new Map();
 
+function senderKey(sender) {
+  const tabId = sender && sender.tab && sender.tab.id !== undefined ? sender.tab.id : "no-tab";
+  const frameId = sender && sender.frameId !== undefined ? sender.frameId : 0;
+  const documentId = String(sender && sender.documentId || sender && sender.url || "unknown-document");
+  return `${tabId}:${frameId}:${documentId}`;
+}
+
+function controllerKey(sender, requestId) {
+  return `${senderKey(sender)}:${String(requestId || "")}`;
+}
+
 function clickNLoadRoute(value) {
   try {
     const url = new URL(String(value));
@@ -17,7 +28,7 @@ function clickNLoadRoute(value) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === "omajdownload-cnl-cancel") {
-    const controller = controllers.get(String(message.requestId || ""));
+    const controller = controllers.get(controllerKey(sender, message.requestId));
     if (controller) controller.abort();
     return false;
   }
@@ -32,8 +43,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   (async () => {
     const requestId = String(message.requestId || "");
+    const requestKey = controllerKey(sender, requestId);
     const controller = new AbortController();
-    if (requestId) controllers.set(requestId, controller);
+    if (requestId) controllers.set(requestKey, controller);
     try {
       const options = { method, cache: "no-store", credentials: "omit", headers: {}, signal: controller.signal };
       if (method === "POST") {
@@ -55,7 +67,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } catch (error) {
       sendResponse({ ok: false, status: 0, message: String(error && error.message || error) });
     } finally {
-      if (requestId) controllers.delete(requestId);
+      if (requestId && controllers.get(requestKey) === controller) controllers.delete(requestKey);
     }
   })();
   return true;

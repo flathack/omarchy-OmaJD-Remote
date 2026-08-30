@@ -10,6 +10,10 @@ small relay scripts run on visited HTTP(S) pages. The service worker itself can
 only contact `127.0.0.1:9666` or `localhost:9666`, and only the two Click'n'Load
 POST paths are accepted. No page content or browsing history is stored.
 
+The precise local data flow, retention, and deletion behavior is documented in
+the project [privacy policy](../PRIVACY.md). Store submissions must also follow
+the checked [submission checklist](STORE_SUBMISSION.md).
+
 The companion also bridges the standard `/flash/` and `/jdcheck.js`
 availability probes, including programmatic and parser-created script tags.
 It authenticates the source-tab metadata to the local

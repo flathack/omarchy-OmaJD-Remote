@@ -107,6 +107,8 @@ not evaluate website-provided code.
 
 OmaJD-Remote runs inside the unsandboxed Omarchy shell, like every Omarchy
 plugin. Review the source before enabling it.
+The browser companion's data flow and retention rules are described in
+[`PRIVACY.md`](PRIVACY.md).
 
 - Password: desktop Secret Service keyring
 - Non-secret settings: `~/.config/omarchy/omajdownload/config.json`
@@ -161,7 +163,7 @@ The manual keyboard regression matrix is in
 [`docs/keyboard-testing.md`](docs/keyboard-testing.md).
 
 Releases use a single version across the plugin and both browser manifests.
-Pushing a matching tag such as `v0.4.0` reruns all checks, proves the browser
+Pushing a matching tag such as `v0.5.0` reruns all checks, proves the browser
 ZIPs reproducible, publishes both archives, and attaches SHA-256 checksums.
 
 For live development, place a checkout at

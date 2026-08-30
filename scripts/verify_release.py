@@ -20,6 +20,15 @@ def manifest_version(path: Path) -> str:
     return value
 
 
+def has_unreleased_entries(changelog: str) -> bool:
+    section = re.search(
+        r"^## \[Unreleased\]\s*(.*?)(?=^## \[|\Z)",
+        changelog,
+        re.MULTILINE | re.DOTALL,
+    )
+    return bool(section and section.group(1).strip())
+
+
 def verify(tag: str = "") -> str:
     versions = {
         manifest_version(PROJECT / "manifest.json"),
@@ -34,6 +43,8 @@ def verify(tag: str = "") -> str:
         raise RuntimeError(f"CHANGELOG.md has no dated [{version}] release section")
     if tag and tag != f"v{version}":
         raise RuntimeError(f"tag {tag!r} does not match manifest version v{version}")
+    if tag and has_unreleased_entries(changelog):
+        raise RuntimeError("CHANGELOG.md still contains Unreleased entries")
     return version
 
 

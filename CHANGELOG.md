@@ -4,10 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-31
+
 - Rename the application and plugin identity to OmaJD-Remote while retaining
   compatibility with existing local configuration and Click'n'Load clients
 - Pulse the bar icon for pending Click'n'Load reviews and show a persistent
   accent state with link counts while LinkGrabber contains links
+- Restore prior keyring credentials after every uncommitted configuration failure
+- Bound Click'n'Load error notifications and claimed-source metadata
+- Show empty-cache refresh errors and invalidate stale listener state
+- Make full-URL reveal exclusive to one Click'n'Load request at a time
+- Require confirmation before dismissing a Click'n'Load request
+- Preserve LinkGrabber rename drafts until the remote result is known
+- Support cache-busted Click'n'Load availability probes consistently
+- Isolate browser request cancellation by tab, frame, and document
+- Preserve XMLHttpRequest timeout semantics beyond the bridge watchdog
+- Add Firefox data-collection declarations and browser-store privacy documentation
+- Strengthen tagged-release validation so Unreleased changes cannot be packaged
 
 ## [0.4.0] - 2026-08-30
 
@@ -69,7 +82,8 @@ All notable changes to this project will be documented in this file.
 - One-click isolated helper installation
 - Animated theme-aware OmaJD-Remote mark
 
-[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.1.0...v0.2.0

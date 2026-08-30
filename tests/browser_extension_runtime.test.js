@@ -9,6 +9,7 @@ const project = path.resolve(__dirname, "..");
 function pageHarness({ failRequests = false } = {}) {
   const listeners = new Map();
   const captured = [];
+  const timerDelays = [];
   class MockFormData {
     constructor(form, submitter) {
       this.values = form ? [...form.fields] : [];
@@ -79,7 +80,7 @@ function pageHarness({ failRequests = false } = {}) {
       if (data.marker !== "omajdownload-cnl-request-v1") return;
       captured.push(data);
       if (data.type === "cancel") return;
-      const body = data.url.endsWith("jdcheck.js") ? "jdownloader=true;" : "success\r\n";
+      const body = new URL(data.url).pathname === "/jdcheck.js" ? "jdownloader=true;" : "success\r\n";
       queueMicrotask(() => {
         for (const callback of listeners.get("message") || []) {
           callback({
@@ -106,10 +107,12 @@ function pageHarness({ failRequests = false } = {}) {
     FormData: MockFormData, HTMLFormElement: MockForm, HTMLScriptElement: MockScript,
     XMLHttpRequest: MockXHR, Event: MockEvent, ProgressEvent: MockProgressEvent, CustomEvent: MockCustomEvent,
     AbortController, DOMException, Error,
-    Promise, Map, WeakSet, String, Date, TypeError, setTimeout, clearTimeout, queueMicrotask
+    Promise, Map, WeakSet, String, Date, Math, TypeError,
+    setTimeout(callback, delay) { timerDelays.push(delay); return setTimeout(callback, delay); },
+    clearTimeout, queueMicrotask
   });
   vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/page-bridge.js"), "utf8"), context);
-  return { window, captured, documentListeners, MockForm, MockScript };
+  return { window, captured, timerDelays, documentListeners, MockForm, MockScript };
 }
 
 test("page bridge preserves fetch(Request) bodies and original usability", async () => {
@@ -220,6 +223,38 @@ test("page bridge handles programmatic jdcheck.js script probes", async () => {
   assert.equal(script.getAttribute("src"), "");
 });
 
+test("page bridge handles cache-busted script probes", async () => {
+  const harness = pageHarness();
+  const script = new harness.MockScript();
+  const loaded = new Promise(resolve => script.addEventListener("load", resolve));
+  script.src = "http://127.0.0.1:9666/jdcheck.js?cache=123#probe";
+  await loaded;
+  assert.equal(harness.window.jdownloader, true);
+  assert.ok(harness.captured.some(row => new URL(row.url).pathname === "/jdcheck.js" && row.url.includes("cache=123")));
+  assert.equal(script.getAttribute("src"), "");
+});
+
+test("XHR uses its own timeout without the bridge watchdog", async () => {
+  const harness = pageHarness();
+  await new Promise(resolve => queueMicrotask(resolve));
+  harness.timerDelays.length = 0;
+  const xhr = new harness.window.XMLHttpRequest();
+  xhr.timeout = 20000;
+  const finished = new Promise(resolve => xhr.addEventListener("loadend", resolve));
+  xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  xhr.send("urls=slow");
+  await finished;
+  assert.deepEqual(harness.timerDelays, [20000]);
+
+  harness.timerDelays.length = 0;
+  const unlimited = new harness.window.XMLHttpRequest();
+  const unlimitedFinished = new Promise(resolve => unlimited.addEventListener("loadend", resolve));
+  unlimited.open("POST", "http://127.0.0.1:9666/flash/add");
+  unlimited.send("urls=unlimited");
+  await unlimitedFinished;
+  assert.deepEqual(harness.timerDelays, []);
+});
+
 test("service worker authenticates provenance and supports GET probes", async () => {
   let listener;
   const calls = [];
@@ -284,4 +319,39 @@ test("service worker authenticates provenance and supports GET probes", async ()
   assert.equal(stopped.ok, false);
   assert.equal(stopped.status, 0);
   assert.match(stopped.message, /listener stopped/);
+});
+
+test("service worker isolates equal request IDs across senders", async () => {
+  let listener;
+  const targetRequests = [];
+  const chrome = { runtime: { onMessage: { addListener(callback) { listener = callback; } } } };
+  const fetch = async (url, options = {}) => {
+    if (String(url).endsWith("/omajdownload/extension-token")) return new Response("token-123", { status: 200 });
+    return new Promise((resolve, reject) => {
+      const pending = { options, resolve };
+      targetRequests.push(pending);
+      options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  };
+  const context = vm.createContext({ chrome, fetch, URL, TextEncoder, String, Error, Response, AbortController, Map });
+  vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/service-worker.js"), "utf8"), context);
+  const firstSender = { tab: { id: 1 }, frameId: 0, documentId: "doc-a", url: "https://a.example" };
+  const secondSender = { tab: { id: 2 }, frameId: 0, documentId: "doc-b", url: "https://b.example" };
+  const invoke = (sender) => new Promise(resolve => {
+    listener({
+      type: "omajdownload-cnl", requestId: "same-id", method: "POST",
+      url: "http://127.0.0.1:9666/flash/add", body: "urls=https%3A%2F%2Ffiles.example"
+    }, sender, resolve);
+  });
+  const first = invoke(firstSender);
+  const second = invoke(secondSender);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(targetRequests.length, 2);
+  listener({ type: "omajdownload-cnl-cancel", requestId: "same-id" }, firstSender, () => {});
+  assert.equal(targetRequests[0].options.signal.aborted, true);
+  assert.equal(targetRequests[1].options.signal.aborted, false);
+  targetRequests[1].resolve(new Response("success\r\n", { status: 200 }));
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.ok, false);
+  assert.equal(secondResult.ok, true);
 });

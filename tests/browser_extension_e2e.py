@@ -38,7 +38,7 @@ SPEC.loader.exec_module(jdctl)
 
 PAGE = b"""<!doctype html><meta charset=utf-8><title>OmaJD-Remote fixture</title>
 <script>window.parserProbeResult = 'pending'</script>
-<script src="http://127.0.0.1:9666/jdcheck.js"
+<script src="http://127.0.0.1:9666/jdcheck.js?parser=1"
         onload="window.parserProbeResult = window.jdownloader === true ? 'loaded' : 'wrong'"
         onerror="window.parserProbeResult = 'error'"></script>
 <iframe name=response hidden></iframe><main id=status>ready</main>"""
@@ -110,6 +110,8 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
             chrome.add_argument("--no-sandbox")
             chrome.add_argument("--disable-dev-shm-usage")
             chrome.add_argument("--ignore-certificate-errors")
+            if os.environ.get("OMAJDOWNLOAD_E2E_HEADLESS") == "1":
+                chrome.add_argument("--headless=new")
             chrome.add_argument(f"--load-extension={PROJECT / 'browser-extension'}")
             yield "chromium", webdriver.Chrome(options=chrome)
 
@@ -133,6 +135,13 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
                     WebDriverWait(driver, 10).until(
                         lambda current: current.execute_script("return window.parserProbeResult") == "loaded"
                     )
+
+                    cache_busted_probe = driver.execute_async_script("""
+                        const done = arguments[arguments.length - 1];
+                        fetch('http://127.0.0.1:9666/flash/?cache=1')
+                          .then(r => r.text()).then(done).catch(e => done('ERROR:' + e));
+                    """)
+                    self.assertIn("JDownloader", cache_busted_probe)
 
                     fetch_result = driver.execute_async_script("""
                         const done = arguments[arguments.length - 1];
@@ -197,7 +206,7 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
                         const script = document.createElement('script');
                         script.onload = () => done(window.jdownloader);
                         script.onerror = () => done(false);
-                        script.src = 'http://127.0.0.1:9666/jdcheck.js';
+                        script.src = 'http://127.0.0.1:9666/jdcheck.js?programmatic=1';
                         document.head.append(script);
                     """)
                     self.assertTrue(script_result)
@@ -249,11 +258,11 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
                         "https://files.example/direct-submit", "https://files.example/encrypted",
                     })
                     form_item = next(item for item in self.bridge.inbox if item["links"] == ["https://files.example/form"])
-                    self.assertEqual(form_item.get("claimed_source"), "https://button.example/cnl")
+                    self.assertEqual(form_item.get("claimed_source"), "button.example")
                     request_submit_item = next(
                         item for item in self.bridge.inbox if item["links"] == ["https://files.example/request-submit"]
                     )
-                    self.assertEqual(request_submit_item.get("claimed_source"), "https://button.example/selected")
+                    self.assertEqual(request_submit_item.get("claimed_source"), "button.example")
                     direct_submit_item = next(
                         item for item in self.bridge.inbox if item["links"] == ["https://files.example/direct-submit"]
                     )

@@ -43,6 +43,9 @@ CNL_INBOX_BYTE_LIMIT = 4 * 1024 * 1024
 CNL_REQUEST_LINK_LIMIT = 2000
 CNL_INBOX_LINK_LIMIT = 5000
 CNL_DETAIL_LINK_LIMIT = 200
+CNL_EVENT_LIMIT = 32
+CNL_EVENT_DRAIN_LIMIT = 8
+CNL_SOURCE_LABEL_LIMIT = 256
 CNL_KEY_PATTERN = re.compile(r"return\s+['\"]([0-9a-fA-F]{32})['\"]\s*;?", re.IGNORECASE)
 CNL_PENDING = "pending"
 CNL_SUBMITTING = "submitting"
@@ -216,6 +219,19 @@ def source_label(source: str) -> str:
         return source or "Unknown website"
 
 
+def bounded_source_label(source: str) -> str:
+    """Return a compact, display-only source label safe for persistence/QML."""
+    value = source_label(source.strip())
+    if len(value) <= CNL_SOURCE_LABEL_LIMIT:
+        return value
+    return value[: CNL_SOURCE_LABEL_LIMIT - 1] + "…"
+
+
+def compact_claimed_source(source: str) -> str:
+    value = source.strip()
+    return bounded_source_label(value) if value else ""
+
+
 def origin_label(origin: str) -> str:
     try:
         parsed = urlsplit(origin)
@@ -267,6 +283,25 @@ class ClickNLoadServer:
     def start(self) -> None:
         owner = self
 
+        def report_error(message: str) -> None:
+            payload = {"error": message}
+            try:
+                owner.events.put_nowait(payload)
+                return
+            except queue.Full:
+                pass
+            # Keep the newest error without allowing rejected requests to grow
+            # memory indefinitely. Accepted state notifications use a separate
+            # threading.Event and therefore cannot be displaced here.
+            try:
+                owner.events.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                owner.events.put_nowait(payload)
+            except queue.Full:
+                pass
+
         class Handler(BaseHTTPRequestHandler):
             server_version = "OmaJD-Remote-CNL/1"
 
@@ -305,9 +340,10 @@ class ClickNLoadServer:
                 self.end_headers()
 
             def do_GET(self) -> None:
-                if self.path.rstrip("/") == "/flash":
+                endpoint = urlsplit(self.path).path.rstrip("/")
+                if endpoint == "/flash":
                     self.reply(200, "JDownloader\r\n")
-                elif self.path.split("?", 1)[0] == "/jdcheck.js":
+                elif endpoint == "/jdcheck.js":
                     self.reply(200, "jdownloader=true;", "application/javascript; charset=utf-8")
                 elif self.path.split("?", 1)[0] == "/omajdownload/extension-token":
                     self.reply_private(200, owner.extension_token)
@@ -340,13 +376,13 @@ class ClickNLoadServer:
                     owner.admit(payload)
                     self.reply(200, "success\r\n")
                 except (UnicodeDecodeError, ValueError) as exc:
-                    owner.events.put({"error": str(exc)})
+                    report_error(str(exc))
                     self.reply(400, str(exc))
                 except OverflowError as exc:
-                    owner.events.put({"error": str(exc)})
+                    report_error(str(exc))
                     self.reply(429, str(exc))
                 except OSError as exc:
-                    owner.events.put({"error": f"Could not persist Click'n'Load request: {exc}"})
+                    report_error(f"Could not persist Click'n'Load request: {exc}")
                     self.reply(503, "Could not persist Click'n'Load request")
 
         try:
@@ -507,7 +543,8 @@ class Bridge:
         self.grabber_truncated = False
         self.uncertain_add_links: dict[str, Any] | None = None
         self.inbox_lock = threading.Lock()
-        self.cnl_events: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.cnl_events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=CNL_EVENT_LIMIT)
+        self.cnl_state_changed = threading.Event()
         self.cnl_server = ClickNLoadServer(self.admit_cnl, self.cnl_events, port=cnl_port)
         if start_cnl:
             self.cnl_server.start()
@@ -540,6 +577,15 @@ class Bridge:
         changed = False
         for source in inbox:
             item = dict(source)
+            compact_source = compact_claimed_source(text(item.get("claimed_source") or item.get("source")))
+            if item.get("claimed_source") != compact_source or "source" in item:
+                item["claimed_source"] = compact_source
+                item.pop("source", None)
+                changed = True
+            compact_origin = origin_label(text(item.get("origin")))
+            if text(item.get("origin")) != compact_origin:
+                item["origin"] = compact_origin
+                changed = True
             status = text(item.get("status"), CNL_PENDING)
             if status == CNL_SUBMITTING:
                 status = CNL_UNCERTAIN
@@ -645,8 +691,8 @@ class Bridge:
             hosts = link_hosts(item.get("links", []))
             result.append({
                 "id": text(item.get("id")),
-                "source": source_label(text(item.get("claimed_source") or item.get("source"))),
-                "origin": text(item.get("origin")),
+                "source": bounded_source_label(text(item.get("claimed_source") or item.get("source"))),
+                "origin": origin_label(text(item.get("origin"))),
                 "origin_verified": item.get("origin_verified") is True,
                 "link_hosts": hosts[:4],
                 "hidden_host_count": max(0, len(hosts) - 4),
@@ -671,6 +717,8 @@ class Bridge:
             if len(self.inbox) >= CNL_INBOX_LIMIT:
                 raise OverflowError(f"Click'n'Load inbox is full ({CNL_INBOX_LIMIT} requests)")
             item = dict(payload)
+            item["claimed_source"] = compact_claimed_source(text(item.get("claimed_source") or item.get("source")))
+            item.pop("source", None)
             links = item.get("links", [])
             if len(links) > CNL_REQUEST_LINK_LIMIT:
                 raise OverflowError(f"Click'n'Load request has more than {CNL_REQUEST_LINK_LIMIT} links")
@@ -691,20 +739,20 @@ class Bridge:
                     self.inbox = updated
                 raise
             self.inbox = updated
-        self.cnl_events.put({"accepted": True})
+            self.cnl_state_changed.set()
 
     def drain_cnl_events(self) -> None:
-        changed = False
-        while True:
+        for _ in range(CNL_EVENT_DRAIN_LIMIT):
             try:
                 payload = self.cnl_events.get_nowait()
             except queue.Empty:
                 break
             if payload.get("error"):
                 emit({"type": "cnl_error", "message": text(payload.get("error"))})
-                continue
-            if payload.get("accepted"):
-                changed = True
+        with self.inbox_lock:
+            changed = self.cnl_state_changed.is_set()
+            if changed:
+                self.cnl_state_changed.clear()
         if changed:
             self.emit_cnl_state()
 
@@ -1001,6 +1049,13 @@ class Bridge:
                     if exc.committed:
                         persistence_warning = f"; configuration durability warning: {exc}"
                     else:
+                        try:
+                            if previous_target_secret is not None:
+                                secret_store(email, previous_target_secret)
+                            else:
+                                secret_clear(email)
+                        finally:
+                            self.config = old_config
                         raise
                 except Exception:
                     try:

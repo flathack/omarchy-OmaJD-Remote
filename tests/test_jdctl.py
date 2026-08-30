@@ -215,6 +215,11 @@ class ClickNLoadTests(unittest.TestCase):
     def test_source_label_hides_path(self):
         self.assertEqual(jdctl.source_label("https://files.example.test/private/post"), "files.example.test")
 
+    def test_bounded_source_label_caps_unparseable_metadata(self):
+        label = jdctl.bounded_source_label("x" * 500_000)
+        self.assertEqual(len(label), jdctl.CNL_SOURCE_LABEL_LIMIT)
+        self.assertTrue(label.endswith("…"))
+
     def test_http_success_means_payload_is_already_persisted(self):
         admitted = []
         events = queue.Queue()
@@ -257,6 +262,10 @@ class ClickNLoadTests(unittest.TestCase):
         with request.urlopen(f"{base}/flash", timeout=3) as response:
             self.assertEqual(response.read(), b"JDownloader\r\n")
         with request.urlopen(f"{base}/jdcheck.js", timeout=3) as response:
+            self.assertEqual(response.read(), b"jdownloader=true;")
+        with request.urlopen(f"{base}/flash/?cache=1", timeout=3) as response:
+            self.assertEqual(response.read(), b"JDownloader\r\n")
+        with request.urlopen(f"{base}/jdcheck.js?cache=1", timeout=3) as response:
             self.assertEqual(response.read(), b"jdownloader=true;")
 
     def test_http_records_browser_origin_and_requires_token_for_extension_origin(self):
@@ -340,6 +349,25 @@ class ClickNLoadTests(unittest.TestCase):
             statuses = list(executor.map(send, range(16)))
         self.assertEqual(statuses, [200] * 16)
         self.assertEqual(len(admitted), 16)
+
+    def test_rejected_request_events_remain_bounded(self):
+        events = queue.Queue(maxsize=2)
+        server = jdctl.ClickNLoadServer(
+            lambda _payload: (_ for _ in ()).throw(ValueError("rejected")),
+            events,
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+        body = parse.urlencode({"urls": "https://example.test/file"}).encode()
+        for _ in range(12):
+            with self.assertRaises(error.HTTPError) as raised:
+                request.urlopen(request.Request(
+                    f"http://127.0.0.1:{server.port}/flash/add", data=body
+                ), timeout=3)
+            self.assertEqual(raised.exception.code, 400)
+            raised.exception.close()
+        self.assertLessEqual(events.qsize(), 2)
 
 
 class FakeDevice:
@@ -570,6 +598,19 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(OverflowError, "inbox exceeds"):
                 bridge.admit_cnl({"links": ["https://e.test/new"]})
 
+    def test_cnl_admission_compacts_claimed_source_before_persistence(self):
+        bridge = self.make_bridge()
+        with mock.patch.object(bridge, "persist_inbox") as persist:
+            bridge.admit_cnl({
+                "links": ["https://e.test/file"],
+                "source": "x" * 500_000,
+            })
+        stored = persist.call_args.args[0][0]
+        self.assertNotIn("source", stored)
+        self.assertEqual(len(stored["claimed_source"]), jdctl.CNL_SOURCE_LABEL_LIMIT)
+        self.assertEqual(len(bridge.inbox_view()[0]["source"]), jdctl.CNL_SOURCE_LABEL_LIMIT)
+        self.assertTrue(bridge.cnl_state_changed.is_set())
+
     def test_cnl_inbox_survives_bridge_restart(self):
         with TemporaryDirectory() as directory:
             config_dir = Path(directory)
@@ -580,6 +621,22 @@ class BridgeTests(unittest.TestCase):
                 first.admit_cnl({"links": ["https://example.test/persisted"], "source": "https://example.test"})
                 second = jdctl.Bridge(start_cnl=False)
             self.assertEqual(second.inbox[0]["links"], ["https://example.test/persisted"])
+
+    def test_existing_inbox_source_metadata_is_compacted_on_load(self):
+        legacy = [{
+            "id": "legacy",
+            "links": ["https://example.test/file"],
+            "source": "x" * 500_000,
+            "origin": "not a browser origin",
+        }]
+        with mock.patch("jdctl.read_config", return_value={}), \
+                mock.patch("jdctl.read_inbox", return_value=legacy), \
+                mock.patch("jdctl.write_inbox") as write:
+            bridge = jdctl.Bridge(start_cnl=False)
+        self.assertNotIn("source", bridge.inbox[0])
+        self.assertEqual(len(bridge.inbox[0]["claimed_source"]), jdctl.CNL_SOURCE_LABEL_LIMIT)
+        self.assertEqual(bridge.inbox[0]["origin"], "")
+        write.assert_called_once_with(bridge.inbox)
 
     def test_cnl_review_separates_verified_origin_claim_and_private_url_details(self):
         bridge = self.make_bridge()
@@ -840,6 +897,29 @@ class BridgeTests(unittest.TestCase):
             mock.call("same@example.com", "old-secret"),
         ])
         clear.assert_not_called()
+        self.assertFalse(emit.call_args.args[0]["ok"])
+
+    @mock.patch("jdctl.emit")
+    def test_uncommitted_state_commit_error_restores_previous_secret(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "same@example.com"}
+        api = FakeApi([])
+        with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
+                mock.patch("jdctl.secret_lookup", return_value="old-secret"), \
+                mock.patch("jdctl.secret_store") as store, \
+                mock.patch("jdctl.secret_clear") as clear, \
+                mock.patch.object(
+                    bridge,
+                    "persist_config",
+                    side_effect=jdctl.StateCommitError("rename failed", committed=False),
+                ):
+            bridge.handle({"command": "configure", "email": "same@example.com", "password": "new-secret"})
+        self.assertEqual(store.call_args_list, [
+            mock.call("same@example.com", "new-secret"),
+            mock.call("same@example.com", "old-secret"),
+        ])
+        clear.assert_not_called()
+        self.assertEqual(bridge.config, {"email": "same@example.com"})
         self.assertFalse(emit.call_args.args[0]["ok"])
 
     @mock.patch("jdctl.emit")

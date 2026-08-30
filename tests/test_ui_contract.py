@@ -29,11 +29,16 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("onAccepted: packageRow.finishRename(true)", self.widget)
         self.assertIn("Keys.onEscapePressed: packageRow.finishRename(false)", self.widget)
         self.assertIn("function renameGrabberPackage(uuid, name)", self.service)
+        self.assertIn("signal renameFinished(string requestId, bool ok)", self.service)
+        self.assertIn("root.pendingRenameRequest = root.backend.renameGrabberPackage", self.widget)
+        self.assertIn("Rename failed · edit the preserved name and try again", self.widget)
 
     def test_destructive_confirmations_are_reset_and_timed(self):
         self.assertIn("function resetDestructiveState()", self.widget)
         self.assertIn("interval: 10000", self.widget)
         self.assertIn("onSelectedDeviceIdChanged", self.widget)
+        self.assertIn('root.cnlRejectTarget = cnlRow.uuid', self.widget)
+        self.assertIn('tooltipText: cnlRow.confirmingDismiss ? "Confirm dismiss"', self.widget)
 
     def test_ci_requires_qml_tools(self):
         workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -58,6 +63,7 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("helperRetryPaused", self.service)
         self.assertIn("Math.min(60000", self.service)
         self.assertIn("Retry JDownloader helper", self.widget)
+        self.assertIn("root.cnlListening = false", self.service)
 
     def test_manual_add_links_uncertainty_is_explicit(self):
         self.assertIn('command: retrying ? "retry_add_links" : "add_links"', self.service)
@@ -72,6 +78,15 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("clickNLoadLinkCount", self.widget)
         self.assertIn("grabberLinkCount", self.widget)
         self.assertIn("Accessible.name: root.barStatusText", self.widget)
+
+    def test_empty_package_refresh_errors_remain_visible(self):
+        self.assertIn('root.backend.downloads.length > 0 || root.backend.downloadError !== ""', self.widget)
+        self.assertIn('root.backend.grabber.length > 0 || root.backend.grabberError !== ""', self.widget)
+
+    def test_clicknload_details_are_single_target_and_late_responses_are_ignored(self):
+        self.assertIn("property string cnlExpandedId", self.service)
+        self.assertIn('String(data.id || "") !== cnlExpandedId', self.service)
+        self.assertIn("root.backend.cnlExpandedId === uuid", self.widget)
 
 
 if __name__ == "__main__":
