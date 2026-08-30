@@ -4,8 +4,9 @@ Issues and focused pull requests are welcome.
 
 1. Fork the repository and create a branch from `main`.
 2. Keep secrets and real account data out of fixtures and logs.
-3. Run `./scripts/check.sh`.
-4. Test the plugin on Omarchy Quattro when changing QML or shell integration.
+3. Run `./scripts/setup-dev.sh` (or set `PYTHON_BIN` and run `./scripts/check.sh`).
+4. Test the plugin on Omarchy Quattro when changing QML or shell integration,
+   including the matrix in `docs/keyboard-testing.md` for interaction changes.
 5. Describe user-visible behavior and manual test coverage in the pull request.
 
 Do not add automatic file deletion without a separate, explicit confirmation

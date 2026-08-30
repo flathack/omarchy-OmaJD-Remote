@@ -5,635 +5,838 @@ import qs.Commons
 import qs.Ui
 
 Panel {
-  id: root
+    id: root
 
-  moduleName: "io.github.flathack.omajdownload"
-  ipcTarget: "io.github.flathack.omajdownload"
+    moduleName: "io.github.flathack.omajdownload"
+    ipcTarget: "io.github.flathack.omajdownload"
 
-  property string removeTarget: ""
-  property bool confirmForget: false
-  readonly property var backend: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+    property string removeTarget: ""
+    property bool confirmForget: false
+    property string keyboardHint: ""
+    property string pendingLinkRequest: ""
+    property Item focusedControl: null
+    readonly property var backend: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
+    readonly property color foreground: bar ? bar.foreground : Color.foreground
+    readonly property color dim: Qt.darker(foreground, 1.55)
+    readonly property color urgent: bar ? bar.urgent : Color.urgent
+    readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+    implicitWidth: button.implicitWidth
+    implicitHeight: button.implicitHeight
 
-  onOpenedChanged: if (opened && backend) backend.refresh()
-
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    iconComponent: Component {
-      DownloadMark {
-        anchors.centerIn: parent
-        width: Style.space(19)
-        height: width
-        foreground: root.barForeground
-        accent: Color.accent
-        urgent: root.urgent
-        active: root.backend ? root.backend.running : false
-        paused: root.backend ? root.backend.paused : false
-        offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
-      }
+    onOpenedChanged: {
+        if (!opened) {
+            keyboardHint = "";
+            focusedControl = null;
+            return;
+        }
+        if (backend)
+            backend.refresh();
+        Qt.callLater(function () {
+            keyCatcher.forceActiveFocus();
+            root.moveTabFocus(1);
+        });
     }
-    onPressed: function(buttonCode) {
-      if (!root.backend) return
-      if (buttonCode === Qt.RightButton) root.backend.pauseDownloads(!root.backend.paused)
-      else if (buttonCode === Qt.MiddleButton) root.backend.refresh()
-      else root.toggle()
+
+    function collectFocusable(item, result) {
+        if (!item)
+            return;
+        if (item !== keyCatcher && item.visible !== false && item.enabled !== false && item.activeFocusOnTab === true)
+            result.push(item);
+        var children = item.children || [];
+        for (var index = 0; index < children.length; index++)
+            collectFocusable(children[index], result);
     }
-  }
 
-  Rectangle {
-    visible: root.backend && root.backend.cnlInbox.length > 0
-    anchors.right: parent.right
-    anchors.top: parent.top
-    anchors.rightMargin: Style.space(1)
-    anchors.topMargin: Style.space(1)
-    width: Style.space(7)
-    height: width
-    radius: width / 2
-    color: Color.accent
-    border.width: 1
-    border.color: Color.background
-  }
+    function focusableItems() {
+        var result = [];
+        collectFocusable(content, result);
+        result.sort(function (left, right) {
+            var leftPosition = left.mapToItem(content, 0, 0);
+            var rightPosition = right.mapToItem(content, 0, 0);
+            if (Math.abs(leftPosition.y - rightPosition.y) > 2)
+                return leftPosition.y - rightPosition.y;
+            return leftPosition.x - rightPosition.x;
+        });
+        return result;
+    }
 
-  KeyboardPanel {
-    id: panel
-    anchorItem: button
-    owner: root
-    bar: root.bar
-    open: root.opened
-    contentWidth: panel.fittedContentWidth(Style.space(430))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(650))
+    function moveTabFocus(direction) {
+        var items = focusableItems();
+        if (items.length === 0)
+            return;
+        var currentIndex = items.indexOf(focusedControl);
+        var nextIndex = currentIndex < 0 ? (direction >= 0 ? 0 : items.length - 1) : (currentIndex + (direction >= 0 ? 1 : -1) + items.length) % items.length;
+        focusedControl = items[nextIndex];
+        focusedControl.forceActiveFocus();
+        Qt.callLater(root.ensureFocusVisible);
+    }
 
-    Flickable {
-      anchors.fill: parent
-      contentWidth: width
-      contentHeight: content.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      flickableDirection: Flickable.VerticalFlick
-      interactive: contentHeight > height
-      Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
+    function activateFocused() {
+        var target = focusedControl;
+        if (!target || target === keyCatcher) {
+            moveTabFocus(1);
+            return;
+        }
+        if (typeof target.clicked === "function")
+            target.clicked();
+    }
 
-      Column {
-        id: content
-        width: parent.width
-        spacing: Style.space(12)
+    function deleteFocused() {
+        var target = focusedControl;
+        if (target && target.destructiveAction === true && typeof target.clicked === "function")
+            target.clicked();
+    }
 
-        PanelHero {
-          width: parent.width
-          title: root.backend && root.backend.configured ? root.backend.selectedDeviceName : "OmaJDownLoad"
-          meta: !root.backend ? "STARTING HELPER"
-            : !root.backend.helperReady ? "ONE-TIME HELPER SETUP"
-            : !root.backend.configured ? "MYJDOWNLOADER SETUP"
-            : root.backend.connected ? (root.backend.controllerState + " · " + root.backend.speedText)
-            : "OFFLINE"
-          detail: root.backend && root.backend.connected ? String(root.backend.activeDownloads) : ""
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconComponent: Component {
+    function ensureFocusVisible() {
+        var target = focusedControl;
+        if (!target || target === keyCatcher || !content)
+            return;
+        var pos = target.mapToItem(content, 0, 0);
+        var top = pos.y - Style.space(8);
+        var bottom = pos.y + target.height + Style.space(8);
+        if (top < panelFlick.contentY)
+            panelFlick.contentY = Math.max(0, top);
+        else if (bottom > panelFlick.contentY + panelFlick.height)
+            panelFlick.contentY = Math.min(Math.max(0, panelFlick.contentHeight - panelFlick.height), bottom - panelFlick.height);
+    }
+
+    function leaveEditor() {
+        keyCatcher.forceActiveFocus();
+        keyboardHint = "Panel navigation";
+        Qt.callLater(root.ensureFocusVisible);
+    }
+
+    BarIconButton {
+        id: button
+        anchors.fill: parent
+        bar: root.bar
+        iconComponent: Component {
             DownloadMark {
-              width: Style.space(44)
-              height: width
-              foreground: root.foreground
-              accent: Color.accent
-              urgent: root.urgent
-              active: root.backend ? root.backend.running : false
-              paused: root.backend ? root.backend.paused : false
-              offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
-            }
-          }
-        }
-
-        Text {
-          visible: root.backend && (root.backend.lastError !== "" || root.backend.actionStatus !== "")
-          width: parent.width
-          text: root.backend && root.backend.actionStatus !== "" ? root.backend.actionStatus : (root.backend ? root.backend.lastError : "")
-          color: root.backend && root.backend.actionStatus !== "" ? root.dim : root.urgent
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
-
-        Column {
-          visible: root.backend && !root.backend.helperReady
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            width: parent.width
-            text: "OmaJDownLoad uses an isolated Python helper for MyJDownloader's encrypted API. Install it once in your user profile."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
-
-          Button {
-            width: parent.width
-            text: root.backend && root.backend.installingHelper ? "Installing helper…" : "Install helper"
-            iconText: root.backend && root.backend.installingHelper ? "󰑓" : "󰇚"
-            iconSpinning: root.backend && root.backend.installingHelper
-            foreground: root.foreground
-            bordered: true
-            enabled: root.backend && !root.backend.installingHelper
-            onClicked: root.backend.installHelper()
-          }
-        }
-
-        Column {
-          id: setupForm
-          visible: root.backend && root.backend.helperReady && !root.backend.configured
-          width: parent.width
-          spacing: Style.space(10)
-
-          Text {
-            width: parent.width
-            text: "Connect your MyJDownloader account. The password is stored in the desktop keyring, never in shell.json."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
-
-          TextField {
-            id: emailField
-            width: parent.width
-            foreground: root.foreground
-            placeholderText: "MyJDownloader email"
-          }
-
-          TextField {
-            id: passwordField
-            width: parent.width
-            foreground: root.foreground
-            placeholderText: "Password"
-            password: true
-            onAccepted: connectButton.clicked()
-          }
-
-          Button {
-            id: connectButton
-            width: parent.width
-            text: root.backend && root.backend.busy ? "Connecting…" : "Connect account"
-            iconText: "󰌾"
-            foreground: root.foreground
-            bordered: true
-            enabled: root.backend && !root.backend.busy
-            onClicked: {
-              if (!root.backend) return
-              root.backend.configure(emailField.text, passwordField.text)
-              passwordField.text = ""
-            }
-          }
-        }
-
-        Column {
-          visible: root.backend && root.backend.configured
-          width: parent.width
-          spacing: Style.space(12)
-
-          Column {
-            width: parent.width
-            spacing: Style.space(7)
-
-            PanelSectionHeader {
-              text: "CLICK'N'LOAD"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(7)
-
-              Rectangle {
-                width: Style.space(7)
+                anchors.centerIn: parent
+                width: Style.space(19)
                 height: width
-                radius: width / 2
-                anchors.verticalCenter: parent.verticalCenter
-                color: root.backend && root.backend.cnlListening ? Color.accent : root.urgent
-              }
+                foreground: root.barForeground
+                accent: Color.accent
+                urgent: root.urgent
+                active: root.backend ? root.backend.running : false
+                paused: root.backend ? root.backend.paused : false
+                offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
+            }
+        }
+        onPressed: function (buttonCode) {
+            if (!root.backend)
+                return;
+            if (buttonCode === Qt.RightButton)
+                root.backend.pauseDownloads(!root.backend.paused);
+            else if (buttonCode === Qt.MiddleButton)
+                root.backend.refresh();
+            else
+                root.toggle();
+        }
+    }
 
-              Text {
-                width: Math.max(0, parent.width - Style.space(14))
-                text: root.backend && root.backend.cnlListening
-                  ? "Ready on this computer · port " + root.backend.cnlPort
-                  : "Listener unavailable" + (root.backend && root.backend.cnlError !== "" ? " · " + root.backend.cnlError : "")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
+    Rectangle {
+        visible: root.backend && root.backend.cnlInbox.length > 0
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.rightMargin: Style.space(1)
+        anchors.topMargin: Style.space(1)
+        width: Style.space(7)
+        height: width
+        radius: width / 2
+        color: Color.accent
+        border.width: 1
+        border.color: Color.background
+    }
+
+    KeyboardPanel {
+        id: panel
+        anchorItem: button
+        owner: root
+        bar: root.bar
+        open: root.opened
+        focusTarget: keyCatcher
+        contentWidth: panel.fittedContentWidth(Style.space(430))
+        contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(650))
+
+        PanelKeyCatcher {
+            id: keyCatcher
+            anchors.fill: parent
+            blocked: emailField.activeFocus || passwordField.activeFocus || linkInput.activeFocus
+            onMoveRequested: function (dx, dy) {
+                root.moveTabFocus(dy !== 0 ? dy : dx);
+            }
+            onActivateRequested: root.activateFocused()
+            onCloseRequested: root.close()
+            onDeleteRequested: root.deleteFocused()
+            onTabRequested: function (direction) {
+                root.moveTabFocus(direction);
+            }
+            onTextKey: function (t) {
+                if (t === "r" || t === "R")
+                    root.backend.refresh();
+                else if (t === "s" || t === "S")
+                    root.backend.startDownloads();
+                else if (t === "p" || t === "P")
+                    root.backend.pauseDownloads(!root.backend.paused);
+                else if ((t === "a" || t === "A") && root.backend && root.backend.configured)
+                    linkInput.forceActiveFocus();
             }
 
-            Text {
-              visible: root.backend && root.backend.cnlInbox.length === 0
-              width: parent.width
-              text: "Click'n'Load buttons will appear here before anything is sent to JDownloader."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-              model: root.backend ? root.backend.cnlInbox : []
-              ClickNLoadRow {
-                required property var modelData
-                width: parent.width
-                item: modelData
-              }
-            }
-          }
-
-          Column {
-            visible: root.backend && root.backend.devices.length > 1
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: "INSTANCE"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.backend ? root.backend.devices : []
-              Button {
-                required property var modelData
-                width: parent.width
-                text: String(modelData.name || "JDownloader")
-                iconText: String(modelData.id || "") === root.backend.selectedDeviceId ? "󰄬" : "󰒋"
-                selected: String(modelData.id || "") === root.backend.selectedDeviceId
-                foreground: root.foreground
-                leftAlign: true
-                onClicked: root.backend.selectDevice(String(modelData.id || ""))
-              }
-            }
-          }
-
-          PanelSeparator {
-            foreground: root.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              text: "CONTROLS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Button {
-                text: "Start"
-                iconText: "󰐊"
-                foreground: root.foreground
-                bordered: true
-                onClicked: root.backend.startDownloads()
-              }
-              Button {
-                text: root.backend && root.backend.paused ? "Resume" : "Pause"
-                iconText: root.backend && root.backend.paused ? "󰐊" : "󰏤"
-                foreground: root.foreground
-                bordered: true
-                onClicked: root.backend.pauseDownloads(!root.backend.paused)
-              }
-              Button {
-                text: "Stop"
-                iconText: "󰓛"
-                foreground: root.foreground
-                bordered: true
-                onClicked: root.backend.stopDownloads()
-              }
-              Button {
-                iconText: "󰑐"
-                tooltipText: "Refresh"
-                foreground: root.foreground
-                onClicked: root.backend.refresh()
-              }
-            }
-          }
-
-          PanelSeparator {
-            foreground: root.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              text: "ADD LINKS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            BorderSurface {
-              width: parent.width
-              height: Style.space(92)
-              color: Style.normalFillFor(root.foreground, Color.accent)
-              borderSpec: Border.controlSpec(linkInput.activeFocus ? "focus" : "normal", root.foreground, Color.accent)
-              radius: Style.cornerRadius
-
-              Controls.TextArea {
-                id: linkInput
+            Flickable {
+                id: panelFlick
                 anchors.fill: parent
-                anchors.margins: Style.space(8)
-                placeholderText: "Paste one or more links…"
-                color: root.foreground
-                placeholderTextColor: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: TextEdit.WrapAnywhere
-                background: null
-              }
+                contentWidth: width
+                contentHeight: content.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                Controls.ScrollBar.vertical: Controls.ScrollBar {
+                    policy: Controls.ScrollBar.AsNeeded
+                }
+
+                Column {
+                    id: content
+                    width: parent.width
+                    spacing: Style.space(12)
+
+                    PanelHero {
+                        width: parent.width
+                        title: root.backend && root.backend.configured ? root.backend.selectedDeviceName : "OmaJDownLoad"
+                        meta: !root.backend ? "STARTING HELPER" : !root.backend.helperReady ? "ONE-TIME HELPER SETUP" : !root.backend.configured ? "MYJDOWNLOADER SETUP" : root.backend.connected ? (root.backend.controllerState + " · " + root.backend.speedText) : "OFFLINE"
+                        detail: root.backend && root.backend.connected ? String(root.backend.activeDownloads) : ""
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        iconComponent: Component {
+                            DownloadMark {
+                                width: Style.space(44)
+                                height: width
+                                foreground: root.foreground
+                                accent: Color.accent
+                                urgent: root.urgent
+                                active: root.backend ? root.backend.running : false
+                                paused: root.backend ? root.backend.paused : false
+                                offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
+                            }
+                        }
+                    }
+
+                    Text {
+                        visible: root.backend && (root.backend.lastError !== "" || root.backend.actionStatus !== "")
+                        width: parent.width
+                        text: root.backend && root.backend.actionStatus !== "" ? root.backend.actionStatus : (root.backend ? root.backend.lastError : "")
+                        color: root.backend && root.backend.actionStatus !== "" ? (root.backend.lastActionOk ? root.dim : root.urgent) : root.urgent
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Text {
+                        visible: root.keyboardHint !== ""
+                        width: parent.width
+                        text: "KEYBOARD · " + root.keyboardHint
+                        color: Color.accent
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.letterSpacing: 0.5
+                        elide: Text.ElideRight
+                    }
+
+                    Column {
+                        visible: root.backend && !root.backend.helperReady
+                        width: parent.width
+                        spacing: Style.space(10)
+
+                        Text {
+                            width: parent.width
+                            text: "OmaJDownLoad uses an isolated Python helper for MyJDownloader's encrypted API. Install it once in your user profile."
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            wrapMode: Text.WordWrap
+                        }
+
+                        ActionButton {
+                            width: parent.width
+                            text: root.backend && root.backend.installingHelper ? (root.backend.helperOutdated ? "Repairing helper…" : "Installing helper…") : (root.backend && root.backend.helperOutdated ? "Repair helper" : "Install helper")
+                            iconText: root.backend && root.backend.installingHelper ? "󰑓" : "󰇚"
+                            iconSpinning: root.backend && root.backend.installingHelper
+                            foreground: root.foreground
+                            bordered: true
+                            enabled: root.backend && !root.backend.installingHelper
+                            onClicked: root.backend.installHelper()
+                        }
+                    }
+
+                    Column {
+                        id: setupForm
+                        visible: root.backend && root.backend.helperReady && !root.backend.configured
+                        width: parent.width
+                        spacing: Style.space(10)
+
+                        Text {
+                            width: parent.width
+                            text: "Connect your MyJDownloader account. The password is stored in the desktop keyring, never in shell.json."
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            wrapMode: Text.WordWrap
+                        }
+
+                        Text {
+                            text: "Email address"
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                        }
+
+                        TextField {
+                            id: emailField
+                            width: parent.width
+                            foreground: root.foreground
+                            placeholderText: "MyJDownloader email"
+                            Accessible.name: "MyJDownloader email"
+                            onActiveFocusChanged: if (activeFocus) {
+                                root.focusedControl = emailField;
+                                root.keyboardHint = Accessible.name;
+                            }
+                            Keys.onEscapePressed: root.leaveEditor()
+                        }
+
+                        Text {
+                            text: "Password"
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                        }
+
+                        TextField {
+                            id: passwordField
+                            width: parent.width
+                            foreground: root.foreground
+                            placeholderText: "Password"
+                            password: true
+                            Accessible.name: "MyJDownloader password"
+                            onActiveFocusChanged: if (activeFocus) {
+                                root.focusedControl = passwordField;
+                                root.keyboardHint = Accessible.name;
+                            }
+                            onAccepted: connectButton.clicked()
+                            Keys.onEscapePressed: root.leaveEditor()
+                        }
+
+                        ActionButton {
+                            id: connectButton
+                            width: parent.width
+                            text: root.backend && root.backend.busy ? "Connecting…" : "Connect account"
+                            iconText: "󰌾"
+                            foreground: root.foreground
+                            bordered: true
+                            enabled: root.backend && !root.backend.busy
+                            onClicked: {
+                                if (!root.backend)
+                                    return;
+                                root.backend.configure(emailField.text, passwordField.text);
+                                passwordField.text = "";
+                            }
+                        }
+                    }
+
+                    Column {
+                        visible: root.backend && root.backend.configured
+                        width: parent.width
+                        spacing: Style.space(12)
+
+                        Column {
+                            width: parent.width
+                            spacing: Style.space(7)
+
+                            PanelSectionHeader {
+                                text: "CLICK'N'LOAD"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(7)
+
+                                Rectangle {
+                                    width: Style.space(7)
+                                    height: width
+                                    radius: width / 2
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: root.backend && root.backend.cnlListening ? Color.accent : root.urgent
+                                }
+
+                                Text {
+                                    width: Math.max(0, parent.width - Style.space(14))
+                                    text: root.backend && root.backend.cnlListening ? "Ready on this computer · port " + root.backend.cnlPort : "Listener unavailable" + (root.backend && root.backend.cnlError !== "" ? " · " + root.backend.cnlError : "")
+                                    color: root.dim
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.caption
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            Text {
+                                visible: root.backend && root.backend.cnlInbox.length === 0
+                                width: parent.width
+                                text: "Click'n'Load buttons will appear here before anything is sent to JDownloader."
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Repeater {
+                                model: root.backend ? root.backend.cnlInbox : []
+                                ClickNLoadRow {
+                                    required property var modelData
+                                    width: parent.width
+                                    item: modelData
+                                }
+                            }
+                        }
+
+                        Column {
+                            visible: root.backend && root.backend.devices.length > 1
+                            width: parent.width
+                            spacing: Style.space(6)
+
+                            PanelSectionHeader {
+                                text: "INSTANCE"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Repeater {
+                                model: root.backend ? root.backend.devices : []
+                                ActionButton {
+                                    required property var modelData
+                                    width: parent.width
+                                    text: String(modelData.name || "JDownloader")
+                                    iconText: String(modelData.id || "") === root.backend.selectedDeviceId ? "󰄬" : "󰒋"
+                                    selected: String(modelData.id || "") === root.backend.selectedDeviceId
+                                    foreground: root.foreground
+                                    leftAlign: true
+                                    onClicked: root.backend.selectDevice(String(modelData.id || ""))
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            foreground: root.foreground
+                        }
+
+                        Column {
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            PanelSectionHeader {
+                                text: "CONTROLS"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Row {
+                                width: parent.width
+                                spacing: Style.space(6)
+
+                                ActionButton {
+                                    text: "Start"
+                                    iconText: "󰐊"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    onClicked: root.backend.startDownloads()
+                                }
+                                ActionButton {
+                                    text: root.backend && root.backend.paused ? "Resume" : "Pause"
+                                    iconText: root.backend && root.backend.paused ? "󰐊" : "󰏤"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    onClicked: root.backend.pauseDownloads(!root.backend.paused)
+                                }
+                                ActionButton {
+                                    text: "Stop"
+                                    iconText: "󰓛"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    onClicked: root.backend.stopDownloads()
+                                }
+                                ActionButton {
+                                    iconText: "󰑐"
+                                    tooltipText: "Refresh"
+                                    foreground: root.foreground
+                                    onClicked: root.backend.refresh()
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            foreground: root.foreground
+                        }
+
+                        Column {
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            PanelSectionHeader {
+                                text: "ADD LINKS"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            BorderSurface {
+                                width: parent.width
+                                height: Style.space(92)
+                                color: Style.normalFillFor(root.foreground, Color.accent)
+                                borderSpec: Border.controlSpec(linkInput.activeFocus ? "focus" : "normal", root.foreground, Color.accent)
+                                radius: Style.cornerRadius
+
+                                Controls.TextArea {
+                                    id: linkInput
+                                    anchors.fill: parent
+                                    anchors.margins: Style.space(8)
+                                    placeholderText: "Paste one or more links…"
+                                    color: root.foreground
+                                    placeholderTextColor: root.dim
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.body
+                                    wrapMode: TextEdit.WrapAnywhere
+                                    activeFocusOnTab: true
+                                    Accessible.name: "Download links"
+                                    background: null
+                                    onActiveFocusChanged: if (activeFocus) {
+                                        root.focusedControl = linkInput;
+                                        root.keyboardHint = Accessible.name + " · Ctrl+Enter sends to LinkGrabber";
+                                    }
+                                    Keys.onEscapePressed: root.leaveEditor()
+                                    Keys.onPressed: function (event) {
+                                        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                                            root.moveTabFocus((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1);
+                                            event.accepted = true;
+                                            return;
+                                        }
+                                        if ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+                                            if (!root.backend.addLinksBusy)
+                                                root.pendingLinkRequest = root.backend.addLinks(linkInput.text, false);
+                                            event.accepted = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row {
+                                spacing: Style.space(6)
+                                ActionButton {
+                                    text: "To LinkGrabber"
+                                    iconText: "󰌷"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    enabled: root.backend && !root.backend.addLinksBusy
+                                    onClicked: {
+                                        root.pendingLinkRequest = root.backend.addLinks(linkInput.text, false);
+                                    }
+                                }
+                                ActionButton {
+                                    text: "Add & start"
+                                    iconText: "󰐊"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    enabled: root.backend && !root.backend.addLinksBusy
+                                    onClicked: {
+                                        root.pendingLinkRequest = root.backend.addLinks(linkInput.text, true);
+                                    }
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            visible: root.backend && root.backend.downloads.length > 0
+                            foreground: root.foreground
+                        }
+
+                        Column {
+                            visible: root.backend && root.backend.downloads.length > 0
+                            width: parent.width
+                            spacing: Style.space(6)
+
+                            PanelSectionHeader {
+                                text: "DOWNLOADS"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Repeater {
+                                model: root.backend ? root.backend.downloads : []
+                                PackageRow {
+                                    required property var modelData
+                                    width: parent.width
+                                    item: modelData
+                                    grabber: false
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            visible: root.backend && root.backend.grabber.length > 0
+                            foreground: root.foreground
+                        }
+
+                        Column {
+                            visible: root.backend && root.backend.grabber.length > 0
+                            width: parent.width
+                            spacing: Style.space(6)
+
+                            PanelSectionHeader {
+                                text: "LINKGRABBER"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Repeater {
+                                model: root.backend ? root.backend.grabber : []
+                                PackageRow {
+                                    required property var modelData
+                                    width: parent.width
+                                    item: modelData
+                                    grabber: true
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            foreground: root.foreground
+                        }
+
+                        ActionButton {
+                            property bool destructiveAction: true
+                            text: root.confirmForget ? "Confirm account removal" : "Disconnect account"
+                            iconText: root.confirmForget ? "󰅙" : "󰌺"
+                            foreground: root.confirmForget ? root.urgent : root.dim
+                            onClicked: {
+                                if (!root.confirmForget) {
+                                    root.confirmForget = true;
+                                } else {
+                                    root.backend.forgetAccount();
+                                    root.confirmForget = false;
+                                }
+                            }
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    Connections {
+        target: root.backend
+        ignoreUnknownSignals: true
+        function onAddLinksFinished(requestId, ok) {
+            if (requestId === "" || requestId !== root.pendingLinkRequest)
+                return;
+            if (ok)
+                linkInput.text = "";
+            else
+                linkInput.forceActiveFocus();
+            root.pendingLinkRequest = "";
+        }
+    }
+
+    component PackageRow: BorderSurface {
+        id: packageRow
+        property var item: ({})
+        property bool grabber: false
+        readonly property string uuid: String(item.uuid || "")
+        readonly property bool confirming: root.removeTarget === (grabber ? "g:" : "d:") + uuid
+
+        color: Style.normalFillFor(root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        radius: Style.cornerRadius
+        implicitHeight: rowContent.implicitHeight + Style.space(12)
+
+        Column {
+            id: rowContent
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(9)
+            anchors.rightMargin: Style.space(7)
+            spacing: Style.space(5)
 
             Row {
-              spacing: Style.space(6)
-              Button {
-                text: "To LinkGrabber"
-                iconText: "󰌷"
-                foreground: root.foreground
-                bordered: true
-                onClicked: {
-                  root.backend.addLinks(linkInput.text, false)
-                  if (linkInput.text.trim() !== "") linkInput.text = ""
-                }
-              }
-              Button {
-                text: "Add & start"
-                iconText: "󰐊"
-                foreground: root.foreground
-                bordered: true
-                onClicked: {
-                  root.backend.addLinks(linkInput.text, true)
-                  if (linkInput.text.trim() !== "") linkInput.text = ""
-                }
-              }
-            }
-          }
-
-          PanelSeparator {
-            visible: root.backend && root.backend.downloads.length > 0
-            foreground: root.foreground
-          }
-
-          Column {
-            visible: root.backend && root.backend.downloads.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: "DOWNLOADS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.backend ? root.backend.downloads : []
-              PackageRow {
-                required property var modelData
                 width: parent.width
-                item: modelData
-                grabber: false
-              }
+                spacing: Style.space(6)
+
+                Column {
+                    width: Math.max(0, parent.width - actionRow.implicitWidth - Style.space(8))
+                    spacing: Style.space(2)
+
+                    Text {
+                        width: parent.width
+                        text: String(packageRow.item.name || "Unnamed package")
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: packageRow.item.running === true
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        width: parent.width
+                        text: packageRow.grabber ? (String(packageRow.item.size_text || "") + (packageRow.item.child_count ? " · " + packageRow.item.child_count + " links" : "")) : (String(packageRow.item.progress || 0) + "% · " + String(packageRow.item.speed_text || "0 B/s"))
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                    }
+                }
+
+                Row {
+                    id: actionRow
+                    spacing: Style.space(2)
+
+                    ActionButton {
+                        iconText: packageRow.grabber ? "󰐊" : "󰐕"
+                        tooltipText: packageRow.grabber ? "Move to downloads" : "Force download"
+                        foreground: root.foreground
+                        onClicked: {
+                            root.removeTarget = "";
+                            if (packageRow.grabber)
+                                root.backend.moveGrabberPackage(packageRow.uuid);
+                            else
+                                root.backend.forcePackage(packageRow.uuid);
+                        }
+                    }
+                    ActionButton {
+                        property bool destructiveAction: true
+                        iconText: packageRow.confirming ? "󰄬" : "󰆴"
+                        tooltipText: packageRow.confirming ? "Confirm removal" : (packageRow.grabber ? "Remove from LinkGrabber" : "Remove entry; keep files")
+                        foreground: packageRow.confirming ? root.urgent : root.dim
+                        onClicked: {
+                            var key = (packageRow.grabber ? "g:" : "d:") + packageRow.uuid;
+                            if (!packageRow.confirming) {
+                                root.removeTarget = key;
+                                return;
+                            }
+                            root.removeTarget = "";
+                            if (packageRow.grabber)
+                                root.backend.removeGrabberPackage(packageRow.uuid);
+                            else
+                                root.backend.removeDownloadPackage(packageRow.uuid);
+                        }
+                    }
+                }
             }
-          }
 
-          PanelSeparator {
-            visible: root.backend && root.backend.grabber.length > 0
-            foreground: root.foreground
-          }
-
-          Column {
-            visible: root.backend && root.backend.grabber.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: "LINKGRABBER"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.backend ? root.backend.grabber : []
-              PackageRow {
-                required property var modelData
+            Rectangle {
+                visible: !packageRow.grabber
                 width: parent.width
-                item: modelData
-                grabber: true
-              }
-            }
-          }
+                height: Style.space(3)
+                radius: height / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.13)
 
-          PanelSeparator {
-            foreground: root.foreground
-          }
-
-          Button {
-            text: root.confirmForget ? "Confirm account removal" : "Disconnect account"
-            iconText: root.confirmForget ? "󰅙" : "󰌺"
-            foreground: root.confirmForget ? root.urgent : root.dim
-            onClicked: {
-              if (!root.confirmForget) {
-                root.confirmForget = true
-              } else {
-                root.backend.forgetAccount()
-                root.confirmForget = false
-              }
+                Rectangle {
+                    width: parent.width * Math.max(0, Math.min(100, Number(packageRow.item.progress || 0))) / 100
+                    height: parent.height
+                    radius: parent.radius
+                    color: root.foreground
+                    Behavior on width {
+                        NumberAnimation {
+                            duration: 180
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+                }
             }
-          }
         }
-      }
     }
-  }
 
-  component PackageRow: BorderSurface {
-    id: packageRow
-    property var item: ({})
-    property bool grabber: false
-    readonly property string uuid: String(item.uuid || "")
-    readonly property bool confirming: root.removeTarget === (grabber ? "g:" : "d:") + uuid
+    component ClickNLoadRow: BorderSurface {
+        id: cnlRow
+        property var item: ({})
 
-    color: Style.normalFillFor(root.foreground, Color.accent)
-    borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
-    radius: Style.cornerRadius
-    implicitHeight: rowContent.implicitHeight + Style.space(12)
-
-    Column {
-      id: rowContent
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(9)
-      anchors.rightMargin: Style.space(7)
-      spacing: Style.space(5)
-
-      Row {
-        width: parent.width
-        spacing: Style.space(6)
+        color: Style.normalFillFor(root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+        radius: Style.cornerRadius
+        implicitHeight: cnlContent.implicitHeight + Style.space(14)
 
         Column {
-          width: Math.max(0, parent.width - actionRow.implicitWidth - Style.space(8))
-          spacing: Style.space(2)
+            id: cnlContent
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(9)
+            anchors.rightMargin: Style.space(7)
+            spacing: Style.space(5)
 
-          Text {
-            width: parent.width
-            text: String(packageRow.item.name || "Unnamed package")
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: packageRow.item.running === true
-            elide: Text.ElideMiddle
-          }
-          Text {
-            width: parent.width
-            text: packageRow.grabber
-              ? (String(packageRow.item.size_text || "") + (packageRow.item.child_count ? " · " + packageRow.item.child_count + " links" : ""))
-              : (String(packageRow.item.progress || 0) + "% · " + String(packageRow.item.speed_text || "0 B/s"))
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
-        }
+            Row {
+                width: parent.width
+                spacing: Style.space(6)
 
-        Row {
-          id: actionRow
-          spacing: Style.space(2)
+                Column {
+                    width: Math.max(0, parent.width - cnlActions.implicitWidth - Style.space(8))
+                    spacing: Style.space(2)
 
-          Button {
-            iconText: packageRow.grabber ? "󰐊" : "󰐕"
-            tooltipText: packageRow.grabber ? "Move to downloads" : "Force download"
-            foreground: root.foreground
-            onClicked: {
-              root.removeTarget = ""
-              if (packageRow.grabber) root.backend.moveGrabberPackage(packageRow.uuid)
-              else root.backend.forcePackage(packageRow.uuid)
+                    Text {
+                        width: parent.width
+                        text: String(cnlRow.item.source || "Unknown website")
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        width: parent.width
+                        text: String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links") + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL") + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                    }
+                }
+
+                Row {
+                    id: cnlActions
+                    spacing: Style.space(2)
+
+                    ActionButton {
+                        iconText: "󰌷"
+                        tooltipText: "Send to LinkGrabber"
+                        foreground: root.foreground
+                        onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), false)
+                    }
+                    ActionButton {
+                        iconText: "󰐊"
+                        tooltipText: "Add and start"
+                        foreground: root.foreground
+                        onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), true)
+                    }
+                    ActionButton {
+                        property bool destructiveAction: true
+                        iconText: "󰆴"
+                        tooltipText: "Dismiss"
+                        foreground: root.dim
+                        onClicked: root.backend.rejectClickNLoad(String(cnlRow.item.id || ""))
+                    }
+                }
             }
-          }
-          Button {
-            iconText: packageRow.confirming ? "󰄬" : "󰆴"
-            tooltipText: packageRow.confirming ? "Confirm removal" : (packageRow.grabber ? "Remove from LinkGrabber" : "Remove entry; keep files")
-            foreground: packageRow.confirming ? root.urgent : root.dim
-            onClicked: {
-              var key = (packageRow.grabber ? "g:" : "d:") + packageRow.uuid
-              if (!packageRow.confirming) {
-                root.removeTarget = key
-                return
-              }
-              root.removeTarget = ""
-              if (packageRow.grabber) root.backend.removeGrabberPackage(packageRow.uuid)
-              else root.backend.removeDownloadPackage(packageRow.uuid)
-            }
-          }
         }
-      }
-
-      Rectangle {
-        visible: !packageRow.grabber
-        width: parent.width
-        height: Style.space(3)
-        radius: height / 2
-        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.13)
-
-        Rectangle {
-          width: parent.width * Math.max(0, Math.min(100, Number(packageRow.item.progress || 0))) / 100
-          height: parent.height
-          radius: parent.radius
-          color: root.foreground
-          Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-        }
-      }
     }
-  }
 
-  component ClickNLoadRow: BorderSurface {
-    id: cnlRow
-    property var item: ({})
-
-    color: Style.normalFillFor(root.foreground, Color.accent)
-    borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
-    radius: Style.cornerRadius
-    implicitHeight: cnlContent.implicitHeight + Style.space(14)
-
-    Column {
-      id: cnlContent
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(9)
-      anchors.rightMargin: Style.space(7)
-      spacing: Style.space(5)
-
-      Row {
-        width: parent.width
-        spacing: Style.space(6)
-
-        Column {
-          width: Math.max(0, parent.width - cnlActions.implicitWidth - Style.space(8))
-          spacing: Style.space(2)
-
-          Text {
-            width: parent.width
-            text: String(cnlRow.item.source || "Unknown website")
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-            elide: Text.ElideMiddle
-          }
-          Text {
-            width: parent.width
-            text: String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links")
-              + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL")
-              + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
+    component ActionButton: Button {
+        id: actionButton
+        readonly property string keyboardName: text !== "" ? text : tooltipText
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: keyboardName
+        onActiveFocusChanged: if (activeFocus) {
+            root.focusedControl = actionButton;
+            root.keyboardHint = keyboardName;
+            Qt.callLater(root.ensureFocusVisible);
         }
-
-        Row {
-          id: cnlActions
-          spacing: Style.space(2)
-
-          Button {
-            iconText: "󰌷"
-            tooltipText: "Send to LinkGrabber"
-            foreground: root.foreground
-            onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), false)
-          }
-          Button {
-            iconText: "󰐊"
-            tooltipText: "Add and start"
-            foreground: root.foreground
-            onClicked: root.backend.acceptClickNLoad(String(cnlRow.item.id || ""), true)
-          }
-          Button {
-            iconText: "󰆴"
-            tooltipText: "Dismiss"
-            foreground: root.dim
-            onClicked: root.backend.rejectClickNLoad(String(cnlRow.item.id || ""))
-          }
-        }
-      }
     }
-  }
 }

@@ -17,7 +17,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 import myjdapi
@@ -29,9 +29,13 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 CONFIG_FILE = CONFIG_DIR / "config.json"
 INBOX_FILE = CONFIG_DIR / "clicknload-inbox.json"
 POLL_SECONDS = 5.0
+DEVICE_REFRESH_SECONDS = 15.0
+PACKAGE_PAGE_SIZE = 60
+PACKAGE_PAGE_LIMIT = 100
 CNL_HOST = "127.0.0.1"
-CNL_PORT = 9666
+CNL_PORT = int(os.environ.get("OMAJDOWNLOAD_CNL_PORT", "9666"))
 CNL_BODY_LIMIT = 1024 * 1024
+CNL_INBOX_LIMIT = 30
 CNL_KEY_PATTERN = re.compile(r"return\s+['\"]([0-9a-fA-F]{32})['\"]\s*;?", re.IGNORECASE)
 
 
@@ -81,7 +85,7 @@ def write_config(data: dict[str, Any]) -> None:
 def read_inbox() -> list[dict[str, Any]]:
     try:
         data = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
     except (OSError, json.JSONDecodeError):
         return []
 
@@ -144,14 +148,27 @@ def source_label(source: str) -> str:
 
 
 class ClickNLoadServer:
-    def __init__(self, events: queue.Queue[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        admit: Callable[[dict[str, Any]], None],
+        events: queue.Queue[dict[str, Any]],
+        host: str = CNL_HOST,
+        port: int = CNL_PORT,
+    ) -> None:
+        self.admit = admit
         self.events = events
+        self.host = host
+        self.requested_port = port
         self.httpd: ThreadingHTTPServer | None = None
         self.error = ""
 
     @property
     def listening(self) -> bool:
         return self.httpd is not None
+
+    @property
+    def port(self) -> int:
+        return int(self.httpd.server_address[1]) if self.httpd is not None else self.requested_port
 
     def start(self) -> None:
         owner = self
@@ -209,20 +226,33 @@ class ClickNLoadServer:
                     raw = self.rfile.read(size).decode("utf-8")
                     fields = parse_qs(raw, keep_blank_values=True, max_num_fields=24)
                     payload = parse_cnl_payload(endpoint, fields)
-                    owner.events.put(payload)
+                    owner.admit(payload)
                     self.reply(200, "success\r\n")
                 except (UnicodeDecodeError, ValueError) as exc:
                     owner.events.put({"error": str(exc)})
                     self.reply(400, str(exc))
+                except OverflowError as exc:
+                    owner.events.put({"error": str(exc)})
+                    self.reply(429, str(exc))
+                except OSError as exc:
+                    owner.events.put({"error": f"Could not persist Click'n'Load request: {exc}"})
+                    self.reply(503, "Could not persist Click'n'Load request")
 
         try:
-            self.httpd = ThreadingHTTPServer((CNL_HOST, CNL_PORT), Handler)
+            self.httpd = ThreadingHTTPServer((self.host, self.requested_port), Handler)
             self.httpd.daemon_threads = True
             thread = threading.Thread(target=self.httpd.serve_forever, name="omajdownload-cnl", daemon=True)
             thread.start()
         except OSError as exc:
             self.httpd = None
             self.error = str(exc)
+
+    def stop(self) -> None:
+        if self.httpd is None:
+            return
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.httpd = None
 
 
 def secret_lookup(email: str) -> str:
@@ -261,12 +291,35 @@ def secret_store(email: str, password: str) -> None:
 def secret_clear(email: str) -> None:
     if not email:
         return
-    subprocess.run(
+    result = subprocess.run(
         ["secret-tool", "clear", "omarchy-plugin", "omajdownload", "account", email],
         check=False,
         capture_output=True,
+        text=True,
         timeout=10,
     )
+    if result.returncode != 0 and result.stderr.strip():
+        raise RuntimeError(result.stderr.strip() or "Could not remove password from the keyring")
+
+
+def query_all_packages(query: Any, fields: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen_pages: set[tuple[str, ...]] = set()
+    for page in range(PACKAGE_PAGE_LIMIT):
+        params = dict(fields)
+        params["maxResults"] = PACKAGE_PAGE_SIZE
+        params["startAt"] = page * PACKAGE_PAGE_SIZE
+        batch = query([params]) or []
+        if not isinstance(batch, list):
+            raise RuntimeError("JDownloader returned an invalid package list")
+        signature = tuple(package_uuid(row) for row in batch if isinstance(row, dict))
+        if batch and signature in seen_pages:
+            raise RuntimeError("JDownloader package pagination repeated a page")
+        seen_pages.add(signature)
+        rows.extend(row for row in batch if isinstance(row, dict))
+        if len(batch) < PACKAGE_PAGE_SIZE:
+            return rows
+    raise RuntimeError(f"JDownloader package list exceeds {PACKAGE_PAGE_SIZE * PACKAGE_PAGE_LIMIT} entries")
 
 
 def package_uuid(row: dict[str, Any]) -> str:
@@ -308,17 +361,21 @@ def normalize_package(row: Any, kind: str) -> dict[str, Any]:
 
 
 class Bridge:
-    def __init__(self) -> None:
+    def __init__(self, start_cnl: bool = True, cnl_port: int = CNL_PORT) -> None:
         self.config = read_config()
         self.inbox = read_inbox()
         self.jd: Any = None
         self.device: Any = None
+        self.active_device_id = ""
         self.devices: list[dict[str, Any]] = []
         self.last_poll = 0.0
+        self.last_device_refresh = 0.0
         self.last_error = ""
+        self.inbox_lock = threading.Lock()
         self.cnl_events: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.cnl_server = ClickNLoadServer(self.cnl_events)
-        self.cnl_server.start()
+        self.cnl_server = ClickNLoadServer(self.admit_cnl, self.cnl_events, port=cnl_port)
+        if start_cnl:
+            self.cnl_server.start()
 
     @property
     def email(self) -> str:
@@ -328,33 +385,46 @@ class Bridge:
     def selected_id(self) -> str:
         return text(self.config.get("selected_device_id"))
 
+    def refresh_devices(self, update: bool = True) -> None:
+        if self.jd is None:
+            self.devices = []
+            self.device = None
+            return
+        if update:
+            self.jd.update_devices()
+        rows = self.jd.list_devices() or []
+        self.devices = [
+            {"id": text(item.get("id")), "name": text(item.get("name"), "JDownloader"), "type": text(item.get("type"))}
+            for item in rows
+        ]
+        online_ids = {item["id"] for item in self.devices}
+        current_id = text(getattr(self.device, "device_id", ""))
+        preferred = self.selected_id
+        target = preferred if preferred in online_ids else (current_id if current_id in online_ids else "")
+        if not target and self.devices:
+            target = self.devices[0]["id"]
+        if not target:
+            self.device = None
+        elif self.device is None or current_id != target:
+            self.device = self.jd.get_device(device_id=target)
+            self.device.disable_direct_connection()
+        self.active_device_id = target
+        self.last_device_refresh = time.monotonic()
+
     def connect(self, email: str | None = None, password: str | None = None) -> None:
         account = email or self.email
         credential = password if password is not None else secret_lookup(account)
         if not account or not credential:
-            raise RuntimeError("MyJDownloader account is not configured")
+            raise RuntimeError("MyJDownloader password is unavailable in the desktop keyring")
 
         jd = myjdapi.Myjdapi()
         jd.set_app_key(APP_KEY)
         jd.connect(account, credential)
-        devices = jd.list_devices() or []
-        if not devices:
-            raise RuntimeError("No online JDownloader instance was found")
-
-        selected = self.selected_id
-        if not any(text(item.get("id")) == selected for item in devices):
-            selected = text(devices[0].get("id"))
-        device = jd.get_device(device_id=selected)
-        device.disable_direct_connection()
-
         self.jd = jd
-        self.device = device
-        self.devices = [
-            {"id": text(item.get("id")), "name": text(item.get("name"), "JDownloader"), "type": text(item.get("type"))}
-            for item in devices
-        ]
+        if self.email and self.email != account:
+            self.config.pop("selected_device_id", None)
         self.config["email"] = account
-        self.config["selected_device_id"] = selected
+        self.refresh_devices(update=False)
         self.last_error = ""
 
     def disconnect(self) -> None:
@@ -365,6 +435,7 @@ class Bridge:
             pass
         self.jd = None
         self.device = None
+        self.active_device_id = ""
         self.devices = []
 
     def inbox_view(self) -> list[dict[str, Any]]:
@@ -383,10 +454,22 @@ class Bridge:
         emit({
             "type": "cnl",
             "listening": self.cnl_server.listening,
-            "port": CNL_PORT,
+            "port": self.cnl_server.port,
             "error": self.cnl_server.error,
             "inbox": self.inbox_view(),
         })
+
+    def admit_cnl(self, payload: dict[str, Any]) -> None:
+        with self.inbox_lock:
+            if len(self.inbox) >= CNL_INBOX_LIMIT:
+                raise OverflowError(f"Click'n'Load inbox is full ({CNL_INBOX_LIMIT} requests)")
+            item = dict(payload)
+            item["id"] = uuid.uuid4().hex
+            item["received_at"] = time.strftime("%H:%M")
+            updated = [*self.inbox, item]
+            write_inbox(updated)
+            self.inbox = updated
+        self.cnl_events.put({"accepted": True})
 
     def drain_cnl_events(self) -> None:
         changed = False
@@ -398,17 +481,13 @@ class Bridge:
             if payload.get("error"):
                 emit({"type": "cnl_error", "message": text(payload.get("error"))})
                 continue
-            payload["id"] = uuid.uuid4().hex
-            payload["received_at"] = time.strftime("%H:%M")
-            self.inbox.append(payload)
-            self.inbox = self.inbox[-30:]
-            changed = True
+            if payload.get("accepted"):
+                changed = True
         if changed:
-            write_inbox(self.inbox)
             self.emit_cnl_state()
 
     def snapshot(self, refresh: bool = True) -> None:
-        configured = bool(self.email and secret_lookup(self.email))
+        configured = bool(self.email)
         if not configured:
             emit({
                 "type": "snapshot",
@@ -426,11 +505,30 @@ class Bridge:
             return
 
         try:
-            if self.device is None:
+            if self.jd is None:
                 self.connect()
+            elif time.monotonic() - self.last_device_refresh >= DEVICE_REFRESH_SECONDS:
+                self.refresh_devices()
+            if self.device is None:
+                emit({
+                    "type": "snapshot",
+                    "configured": True,
+                    "connected": False,
+                    "devices": self.devices,
+                    "selected_device_id": self.active_device_id,
+                    "selected_device_name": "No online instance",
+                    "controller_state": "OFFLINE",
+                    "speed": 0,
+                    "speed_text": "0 B/s",
+                    "downloads": [],
+                    "grabber": [],
+                    "active_downloads": 0,
+                    "error": "No online JDownloader instance was found",
+                })
+                return
             controller = text(self.device.downloadcontroller.get_current_state(), "IDLE")
             speed = number(self.device.downloadcontroller.get_speed_in_bytes())
-            download_rows = self.device.downloads.query_packages([{
+            download_rows = query_all_packages(self.device.downloads.query_packages, {
                 "bytesLoaded": True,
                 "bytesTotal": True,
                 "childCount": True,
@@ -438,28 +536,24 @@ class Bridge:
                 "eta": True,
                 "finished": True,
                 "hosts": True,
-                "maxResults": 60,
                 "running": True,
                 "speed": True,
-                "startAt": 0,
                 "status": True,
-            }]) or []
-            grabber_rows = self.device.linkgrabber.query_packages([{
+            })
+            grabber_rows = query_all_packages(self.device.linkgrabber.query_packages, {
                 "availableOfflineCount": True,
                 "availableOnlineCount": True,
                 "bytesTotal": True,
                 "childCount": True,
                 "enabled": True,
                 "hosts": True,
-                "maxResults": 60,
-                "startAt": 0,
                 "status": True,
-            }]) or []
+            })
             downloads = [normalize_package(row, "download") for row in download_rows]
             grabber = [normalize_package(row, "grabber") for row in grabber_rows]
             active = sum(1 for item in downloads if item["running"])
             selected_name = next(
-                (item["name"] for item in self.devices if item["id"] == self.selected_id),
+                (item["name"] for item in self.devices if item["id"] == self.active_device_id),
                 "JDownloader",
             )
             emit({
@@ -467,7 +561,7 @@ class Bridge:
                 "configured": True,
                 "connected": True,
                 "devices": self.devices,
-                "selected_device_id": self.selected_id,
+                "selected_device_id": self.active_device_id,
                 "selected_device_name": selected_name,
                 "controller_state": controller,
                 "speed": speed,
@@ -497,8 +591,15 @@ class Bridge:
                 "error": self.last_error,
             })
 
-    def action_result(self, ok: bool, message: str) -> None:
-        emit({"type": "action", "ok": ok, "message": message})
+    def action_result(self, ok: bool, message: str, request: dict[str, Any] | None = None) -> None:
+        source = request or {}
+        emit({
+            "type": "action",
+            "ok": ok,
+            "message": message,
+            "command": text(source.get("command")),
+            "request_id": text(source.get("request_id")),
+        })
 
     def handle(self, request: dict[str, Any]) -> None:
         command = text(request.get("command"))
@@ -511,7 +612,7 @@ class Bridge:
             email = text(request.get("email")).strip()
             password = text(request.get("password"))
             if "@" not in email or not password:
-                self.action_result(False, "Please enter a valid email address and password")
+                self.action_result(False, "Please enter a valid email address and password", request)
                 return
             try:
                 old_email = self.email
@@ -521,11 +622,11 @@ class Bridge:
                 write_config(self.config)
                 if old_email and old_email != email:
                     secret_clear(old_email)
-                self.action_result(True, f"Connected to {len(self.devices)} JDownloader instance(s)")
+                self.action_result(True, f"Connected to {len(self.devices)} JDownloader instance(s)", request)
                 self.snapshot()
             except Exception as exc:
                 self.disconnect()
-                self.action_result(False, str(exc).strip() or "MyJDownloader login failed")
+                self.action_result(False, str(exc).strip() or "MyJDownloader login failed", request)
             finally:
                 password = ""
             return
@@ -533,29 +634,41 @@ class Bridge:
         if command == "forget":
             old_email = self.email
             self.disconnect()
-            secret_clear(old_email)
             try:
+                secret_clear(old_email)
                 CONFIG_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.action_result(False, str(exc).strip() or "Could not remove the MyJDownloader account", request)
+                self.config = read_config()
+                self.snapshot()
+                return
             self.config = {}
-            self.action_result(True, "MyJDownloader account removed")
+            self.action_result(True, "MyJDownloader account removed", request)
             self.snapshot()
             return
 
         if command == "cnl_reject":
             item_id = text(request.get("id"))
-            before = len(self.inbox)
-            self.inbox = [item for item in self.inbox if text(item.get("id")) != item_id]
-            write_inbox(self.inbox)
-            removed = len(self.inbox) != before
-            self.action_result(removed, "Click'n'Load request removed" if removed else "Click'n'Load request not found")
+            try:
+                with self.inbox_lock:
+                    before = len(self.inbox)
+                    updated = [item for item in self.inbox if text(item.get("id")) != item_id]
+                    removed = len(updated) != before
+                    if removed:
+                        write_inbox(updated)
+                        self.inbox = updated
+            except OSError as exc:
+                self.action_result(False, f"Could not remove Click'n'Load request: {exc}", request)
+                return
+            self.action_result(removed, "Click'n'Load request removed" if removed else "Click'n'Load request not found", request)
             self.emit_cnl_state()
             return
 
         try:
-            if self.device is None:
+            if self.jd is None:
                 self.connect()
+            if self.device is None:
+                raise RuntimeError("No online JDownloader instance is available")
 
             if command == "select_device":
                 device_id = text(request.get("device_id"))
@@ -563,9 +676,10 @@ class Bridge:
                     raise RuntimeError("The selected JDownloader instance is not online")
                 self.device = self.jd.get_device(device_id=device_id)
                 self.device.disable_direct_connection()
+                self.active_device_id = device_id
                 self.config["selected_device_id"] = device_id
                 write_config(self.config)
-                self.action_result(True, "JDownloader instance selected")
+                self.action_result(True, "JDownloader instance selected", request)
             elif command == "control":
                 action = text(request.get("action"))
                 if action == "start":
@@ -578,11 +692,11 @@ class Bridge:
                     self.device.downloadcontroller.pause_downloads(False)
                 else:
                     raise RuntimeError("Unknown download control action")
-                self.action_result(True, f"Downloads: {action}")
+                self.action_result(True, f"Downloads: {action}", request)
             elif command == "force_download":
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.downloads.force_download([], ids)
-                self.action_result(True, "Package started")
+                self.action_result(True, "Package started", request)
             elif command == "add_links":
                 links = text(request.get("links")).strip()
                 if not links:
@@ -598,7 +712,7 @@ class Bridge:
                     "destinationFolder": None,
                     "overwritePackagizerRules": False,
                 }])
-                self.action_result(True, "Links added" + (" and queued" if autostart else " to LinkGrabber"))
+                self.action_result(True, "Links added" + (" and queued" if autostart else " to LinkGrabber"), request)
             elif command == "cnl_accept":
                 item_id = text(request.get("id"))
                 item = next((entry for entry in self.inbox if text(entry.get("id")) == item_id), None)
@@ -617,22 +731,24 @@ class Bridge:
                     "destinationFolder": None,
                     "overwritePackagizerRules": False,
                 }])
-                self.inbox = [entry for entry in self.inbox if text(entry.get("id")) != item_id]
-                write_inbox(self.inbox)
+                with self.inbox_lock:
+                    updated = [entry for entry in self.inbox if text(entry.get("id")) != item_id]
+                    write_inbox(updated)
+                    self.inbox = updated
                 self.emit_cnl_state()
-                self.action_result(True, "Click'n'Load links added" + (" and queued" if autostart else " to LinkGrabber"))
+                self.action_result(True, "Click'n'Load links added" + (" and queued" if autostart else " to LinkGrabber"), request)
             elif command == "move_grabber":
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.linkgrabber.move_to_downloadlist([], ids)
-                self.action_result(True, "Package moved to downloads")
+                self.action_result(True, "Package moved to downloads", request)
             elif command == "remove_downloads":
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.downloads.remove_links([], ids)
-                self.action_result(True, "Download entry removed; files were kept")
+                self.action_result(True, "Download entry removed; files were kept", request)
             elif command == "remove_grabber":
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.linkgrabber.remove_links([], ids)
-                self.action_result(True, "LinkGrabber entry removed")
+                self.action_result(True, "LinkGrabber entry removed", request)
             else:
                 raise RuntimeError("Unknown command")
 
@@ -640,7 +756,7 @@ class Bridge:
             self.snapshot()
             self.last_poll = time.monotonic()
         except Exception as exc:
-            self.action_result(False, str(exc).strip() or "JDownloader action failed")
+            self.action_result(False, str(exc).strip() or "JDownloader action failed", request)
 
     def run(self) -> None:
         self.snapshot()

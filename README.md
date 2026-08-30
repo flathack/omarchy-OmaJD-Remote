@@ -28,13 +28,14 @@ machine.
 - Removes download-list entries without deleting downloaded files
 - Uses a theme-aware vector mark with animated, paused, and offline states
 - Stores the MyJDownloader password in Secret Service, never in `shell.json`
+- Supports full keyboard operation, including scrolling focus into view
 
 ## Requirements
 
 - Omarchy 4 / Quattro
-- Python 3 with `venv`
+- Python 3.13 or 3.14 on x86-64 with `venv`
 - `secret-tool` from `libsecret`
-- A MyJDownloader account with at least one connected JDownloader device
+- A MyJDownloader account (devices may be offline during setup)
 
 ## Install from GitHub
 
@@ -59,6 +60,14 @@ You can also install the helper from a terminal:
 | Left click | Open or close the control panel |
 | Middle click | Refresh status |
 | Right click | Pause or resume all downloads |
+| `Tab` / `Shift+Tab` | Move through every available action |
+| Arrow keys or `h j k l` | Move backward or forward through actions |
+| `Enter` / `Space` | Activate the focused action |
+| `x` | Trigger the focused destructive action, which still requires confirmation where applicable |
+| `a` | Focus the link editor |
+| `r`, `s`, `p` | Refresh, start, or pause/resume |
+| `Escape` | Leave an editor, then close the panel |
+| `Ctrl+Enter` | Submit the link editor to LinkGrabber |
 
 The panel offers explicit controls for start, pause/resume, stop, force-start,
 LinkGrabber submission, queue movement, and removal. Removing a download entry
@@ -75,7 +84,9 @@ started, or dismissed. The current MyJDownloader device selection is used.
 
 The listener is bound to loopback only, limits request size, and never executes
 JavaScript supplied by a website. CNL2 pages that generate their AES key through
-dynamic JavaScript need the optional browser companion planned for a later release.
+dynamic JavaScript can use the optional browser companion in
+[`browser-extension/`](browser-extension/README.md). It forwards the already
+constructed local request and leaves final approval in the panel inbox.
 
 ## Security and local data
 
@@ -91,7 +102,7 @@ plugin. Review the source before enabling it.
 The password is passed from QML to the long-lived helper over stdin. It never
 appears in process arguments, plugin settings, logs, or `shell.json`.
 
-Dependency versions are pinned in `requirements.txt`; their licenses are
+Dependency versions and artifacts are hash-locked in `requirements.lock`; their licenses are
 listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Remove
@@ -109,13 +120,18 @@ The isolated helper environment may be removed separately from
 ## Development
 
 ```bash
-./scripts/check.sh
-omarchy plugin validate .
+./scripts/setup-dev.sh
+./scripts/build-extension.sh
 ```
 
-For a live local checkout, copy the repository to
-`~/.config/omarchy/plugins/io.github.flathack.omajdownload`, enable it, and edit there.
-Omarchy hot-reloads plugin changes.
+`setup-dev.sh` creates a cached virtual environment from the hash lock and runs
+all Python, shell, manifest, browser-script, and plugin validation checks.
+The manual keyboard regression matrix is in
+[`docs/keyboard-testing.md`](docs/keyboard-testing.md).
+
+For live development, place a checkout at
+`~/.config/omarchy/plugins/io.github.flathack.omajdownload` and enable it.
+Omarchy then hot-reloads QML changes.
 
 ## License
 
