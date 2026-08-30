@@ -12,14 +12,25 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base
     steps:
-      - run: pacman -Syu --noconfirm git qt6-declarative quickshell
+      - run: pacman -Syu --noconfirm git qt6-declarative quickshell weston
       - uses: actions/checkout@v7
       - run: git clone --depth 1 --branch quattro https://github.com/basecamp/omarchy.git /tmp/omarchy
       - env:
           OMARCHY_SHELL_SOURCE: /tmp/omarchy/shell
         run: |
           ./scripts/check-qml.sh
-          ./scripts/qml-runtime-smoke.sh
+          export XDG_RUNTIME_DIR=/tmp/omajdownload-runtime
+          install -d -m 700 "$XDG_RUNTIME_DIR"
+          weston --backend=headless --socket=wayland-omajdownload --idle-time=0 >/tmp/weston.log 2>&1 &
+          weston_pid=$!
+          trap 'kill "$weston_pid"' EXIT
+          attempt=0
+          while [ "$attempt" -lt 50 ]; do
+            [ -S "$XDG_RUNTIME_DIR/wayland-omajdownload" ] && break
+            sleep 0.1
+            attempt=$((attempt + 1))
+          done
+          WAYLAND_DISPLAY=wayland-omajdownload QT_QPA_PLATFORM=wayland ./scripts/qml-runtime-smoke.sh
 
   browser-e2e:
     runs-on: ubuntu-latest
@@ -27,12 +38,13 @@ jobs:
     steps:
       - run: >-
           pacman -Syu --noconfirm
-          chromium firefox geckodriver python python-pip python-selenium
+          chromium firefox geckodriver python python-pip
           xorg-server-xvfb openssl zip unzip
       - uses: actions/checkout@v7
       - run: |
           python -m venv --system-site-packages /tmp/omajdownload-e2e
           /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
+          /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check selenium==4.35.0
           ./scripts/build-extension.sh
       - env:
           RUN_BROWSER_E2E: "1"
