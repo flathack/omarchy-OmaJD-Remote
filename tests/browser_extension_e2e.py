@@ -113,6 +113,7 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
 
         firefox = FirefoxOptions()
         firefox.accept_insecure_certs = True
+        firefox.add_argument("-headless")
         driver = webdriver.Firefox(options=firefox)
         package = PROJECT / "dist" / "omajdownload-clicknload-firefox.zip"
         driver.install_addon(str(package), temporary=True)

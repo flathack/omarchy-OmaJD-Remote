@@ -39,8 +39,12 @@ if [[ "$status" != "0" ]]; then
   exit "$status"
 fi
 
-# Quickshell infrastructure messages are allowed; QML load/runtime warnings are not.
-if grep -Eqi '(^|[[:space:]])(warning|critical|fatal):|failed to load|is not a type|cannot assign|referenceerror|typeerror' "$runtime_log"; then
+# Allow only known headless graphics/service noise; QML load/runtime warnings fail.
+filtered_log="$(sed -E \
+  -e '/MESA(-EGL)?: (warning|error):/d' \
+  -e '/WARN.*Process failed to start.*Command: QList\("hyprctl"/d' \
+  "$runtime_log")"
+if grep -Eqi '(^|[[:space:]])(warning|critical|fatal):|failed to load|is not a type|cannot assign|referenceerror|typeerror' <<<"$filtered_log"; then
   cat "$runtime_log" >&2
   echo "QML runtime smoke test emitted a non-allowlisted warning." >&2
   exit 1

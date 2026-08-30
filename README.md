@@ -150,8 +150,9 @@ all Python, shell, manifest, browser-script, and plugin validation checks.
 CI additionally runs semantic QML checks against current Omarchy Quattro and
 real HTTPS extension fixtures in stable Chromium and Firefox.
 The QML runtime smoke test rejects load failures and QML `Warning`, `Critical`,
-`Fatal`, `ReferenceError`, and `TypeError` messages; only Quickshell
-infrastructure `INFO` output and platform-service `WARN` messages are allowed.
+`Fatal`, `ReferenceError`, and `TypeError` messages. Its narrow allowlist covers
+only headless Mesa diagnostics, missing `hyprctl` in CI, Quickshell `INFO`, and
+platform-service `WARN` messages.
 The manual keyboard regression matrix is in
 [`docs/keyboard-testing.md`](docs/keyboard-testing.md).
 

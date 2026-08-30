@@ -48,6 +48,7 @@ jobs:
           ./scripts/build-extension.sh
       - env:
           RUN_BROWSER_E2E: "1"
+          MOZ_DISABLE_CONTENT_SANDBOX: "1"
         run: |
           Xvfb :99 -screen 0 1280x1024x24 &
           xvfb_pid=$!
