@@ -404,6 +404,7 @@ class BridgeTests(unittest.TestCase):
             ({"command": "control", "action": "resume"}, device.downloadcontroller.pause_downloads),
             ({"command": "force_download", "package_ids": ["42"]}, device.downloads.force_download),
             ({"command": "move_grabber", "package_ids": ["42"]}, device.linkgrabber.move_to_downloadlist),
+            ({"command": "rename_grabber", "package_id": "42", "name": "  Clear release name  "}, device.linkgrabber.rename_package),
             ({"command": "remove_downloads", "package_ids": ["42"]}, device.downloads.remove_links),
             ({"command": "remove_grabber", "package_ids": ["42"]}, device.linkgrabber.remove_links),
         ]
@@ -411,6 +412,8 @@ class BridgeTests(unittest.TestCase):
             for command, method in commands:
                 bridge.handle(command)
                 method.assert_called()
+
+        device.linkgrabber.rename_package.assert_called_once_with("42", "Clear release name")
 
         with mock.patch("jdctl.write_config"), mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
             bridge.handle({"command": "select_device", "device_id": "device-2"})
@@ -422,6 +425,18 @@ class BridgeTests(unittest.TestCase):
         device.linkgrabber.add_links.assert_called()
         self.assertEqual(bridge.inbox, [])
         self.assertTrue(all(call.args[0]["ok"] for call in emit.call_args_list if call.args[0].get("type") == "action"))
+
+    @mock.patch("jdctl.emit")
+    def test_rename_grabber_rejects_an_empty_name(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        bridge.device = bridge.jd.device_objects["device-1"]
+        with mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
+            bridge.handle({"command": "rename_grabber", "package_id": "42", "name": "   "})
+        bridge.device.linkgrabber.rename_package.assert_not_called()
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertIn("required", emit.call_args.args[0]["message"])
 
     @mock.patch("jdctl.emit")
     def test_configure_and_idempotent_forget_persist_state(self, emit):

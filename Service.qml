@@ -116,6 +116,13 @@ Item {
             package_ids: [String(uuid)]
         });
     }
+    function renameGrabberPackage(uuid, name) {
+        send({
+            command: "rename_grabber",
+            package_id: String(uuid),
+            name: String(name || "")
+        });
+    }
     function removeDownloadPackage(uuid) {
         send({
             command: "remove_downloads",

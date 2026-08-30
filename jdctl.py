@@ -741,6 +741,13 @@ class Bridge:
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.linkgrabber.move_to_downloadlist([], ids)
                 self.action_result(True, "Package moved to downloads", request)
+            elif command == "rename_grabber":
+                package_id = text(request.get("package_id")).strip()
+                name = text(request.get("name")).strip()
+                if not package_id or not name:
+                    raise RuntimeError("Package ID and name are required")
+                self.device.linkgrabber.rename_package(package_id, name)
+                self.action_result(True, "LinkGrabber package renamed", request)
             elif command == "remove_downloads":
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.downloads.remove_links([], ids)

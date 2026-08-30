@@ -14,6 +14,9 @@ Panel {
     property bool confirmForget: false
     property string keyboardHint: ""
     property string pendingLinkRequest: ""
+    property string renameTarget: ""
+    property string renameDraft: ""
+    property bool renameEditorFocused: false
     property Item focusedControl: null
     readonly property var backend: bar && bar.shell ? bar.shell.serviceFor(root.moduleName) : null
     readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -27,6 +30,9 @@ Panel {
     onOpenedChanged: {
         if (!opened) {
             keyboardHint = "";
+            renameTarget = "";
+            renameDraft = "";
+            renameEditorFocused = false;
             focusedControl = null;
             return;
         }
@@ -163,12 +169,22 @@ Panel {
         PanelKeyCatcher {
             id: keyCatcher
             anchors.fill: parent
-            blocked: emailField.activeFocus || passwordField.activeFocus || linkInput.activeFocus
+            blocked: emailField.activeFocus || passwordField.activeFocus || linkInput.activeFocus || root.renameEditorFocused
             onMoveRequested: function (dx, dy) {
                 root.moveTabFocus(dy !== 0 ? dy : dx);
             }
             onActivateRequested: root.activateFocused()
-            onCloseRequested: root.close()
+            onCloseRequested: {
+                if (root.renameTarget !== "") {
+                    root.renameTarget = "";
+                    root.renameDraft = "";
+                    root.renameEditorFocused = false;
+                    root.keyboardHint = "Rename cancelled";
+                    keyCatcher.forceActiveFocus();
+                } else {
+                    root.close();
+                }
+            }
             onDeleteRequested: root.deleteFocused()
             onTabRequested: function (direction) {
                 root.moveTabFocus(direction);
@@ -351,6 +367,62 @@ Panel {
 
                         Column {
                             width: parent.width
+                            spacing: Style.space(6)
+
+                            PanelSectionHeader {
+                                text: "TRANSPORT"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Row {
+                                spacing: Style.space(5)
+
+                                ActionButton {
+                                    iconText: "󰐊"
+                                    tooltipText: "Start downloads"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    horizontalPadding: Style.space(7)
+                                    verticalPadding: Style.space(4)
+                                    onClicked: root.backend.startDownloads()
+                                }
+                                ActionButton {
+                                    iconText: root.backend && root.backend.paused ? "󰐊" : "󰏤"
+                                    tooltipText: root.backend && root.backend.paused ? "Resume downloads" : "Pause downloads"
+                                    foreground: root.foreground
+                                    selected: root.backend && root.backend.paused
+                                    bordered: true
+                                    horizontalPadding: Style.space(7)
+                                    verticalPadding: Style.space(4)
+                                    onClicked: root.backend.pauseDownloads(!root.backend.paused)
+                                }
+                                ActionButton {
+                                    iconText: "󰓛"
+                                    tooltipText: "Stop downloads"
+                                    foreground: root.foreground
+                                    bordered: true
+                                    horizontalPadding: Style.space(7)
+                                    verticalPadding: Style.space(4)
+                                    onClicked: root.backend.stopDownloads()
+                                }
+                                ActionButton {
+                                    iconText: "󰑐"
+                                    tooltipText: "Refresh"
+                                    foreground: root.dim
+                                    horizontalPadding: Style.space(7)
+                                    verticalPadding: Style.space(4)
+                                    onClicked: root.backend.refresh()
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            foreground: root.foreground
+                        }
+
+                        Column {
+                            width: parent.width
                             spacing: Style.space(7)
 
                             PanelSectionHeader {
@@ -427,58 +499,6 @@ Panel {
                             }
                         }
 
-                        PanelSeparator {
-                            foreground: root.foreground
-                        }
-
-                        Column {
-                            width: parent.width
-                            spacing: Style.space(8)
-
-                            PanelSectionHeader {
-                                text: "CONTROLS"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                            }
-
-                            Row {
-                                width: parent.width
-                                spacing: Style.space(6)
-
-                                ActionButton {
-                                    text: "Start"
-                                    iconText: "󰐊"
-                                    foreground: root.foreground
-                                    bordered: true
-                                    onClicked: root.backend.startDownloads()
-                                }
-                                ActionButton {
-                                    text: root.backend && root.backend.paused ? "Resume" : "Pause"
-                                    iconText: root.backend && root.backend.paused ? "󰐊" : "󰏤"
-                                    foreground: root.foreground
-                                    bordered: true
-                                    onClicked: root.backend.pauseDownloads(!root.backend.paused)
-                                }
-                                ActionButton {
-                                    text: "Stop"
-                                    iconText: "󰓛"
-                                    foreground: root.foreground
-                                    bordered: true
-                                    onClicked: root.backend.stopDownloads()
-                                }
-                                ActionButton {
-                                    iconText: "󰑐"
-                                    tooltipText: "Refresh"
-                                    foreground: root.foreground
-                                    onClicked: root.backend.refresh()
-                                }
-                            }
-                        }
-
-                        PanelSeparator {
-                            foreground: root.foreground
-                        }
-
                         Column {
                             width: parent.width
                             spacing: Style.space(8)
@@ -491,39 +511,47 @@ Panel {
 
                             BorderSurface {
                                 width: parent.width
-                                height: Style.space(92)
+                                height: Math.ceil(Style.font.body * 1.4) * 2 + Style.space(16)
                                 color: Style.normalFillFor(root.foreground, Color.accent)
                                 borderSpec: Border.controlSpec(linkInput.activeFocus ? "focus" : "normal", root.foreground, Color.accent)
                                 radius: Style.cornerRadius
 
-                                Controls.TextArea {
-                                    id: linkInput
+                                Controls.ScrollView {
+                                    id: linkScroll
                                     anchors.fill: parent
                                     anchors.margins: Style.space(8)
-                                    placeholderText: "Paste one or more links…"
-                                    color: root.foreground
-                                    placeholderTextColor: root.dim
-                                    font.family: root.fontFamily
-                                    font.pixelSize: Style.font.body
-                                    wrapMode: TextEdit.WrapAnywhere
-                                    activeFocusOnTab: true
-                                    Accessible.name: "Download links"
-                                    background: null
-                                    onActiveFocusChanged: if (activeFocus) {
-                                        root.focusedControl = linkInput;
-                                        root.keyboardHint = Accessible.name + " · Ctrl+Enter sends to LinkGrabber";
-                                    }
-                                    Keys.onEscapePressed: root.leaveEditor()
-                                    Keys.onPressed: function (event) {
-                                        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-                                            root.moveTabFocus((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1);
-                                            event.accepted = true;
-                                            return;
+                                    clip: true
+                                    Controls.ScrollBar.horizontal.policy: Controls.ScrollBar.AlwaysOff
+                                    Controls.ScrollBar.vertical.policy: Controls.ScrollBar.AsNeeded
+
+                                    Controls.TextArea {
+                                        id: linkInput
+                                        width: linkScroll.availableWidth
+                                        placeholderText: "Paste one or more links…"
+                                        color: root.foreground
+                                        placeholderTextColor: root.dim
+                                        font.family: root.fontFamily
+                                        font.pixelSize: Style.font.body
+                                        wrapMode: TextEdit.WrapAnywhere
+                                        activeFocusOnTab: true
+                                        Accessible.name: "Download links"
+                                        background: null
+                                        onActiveFocusChanged: if (activeFocus) {
+                                            root.focusedControl = linkInput;
+                                            root.keyboardHint = Accessible.name + " · Ctrl+Enter sends to LinkGrabber";
                                         }
-                                        if ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
-                                            if (!root.backend.addLinksBusy)
-                                                root.pendingLinkRequest = root.backend.addLinks(linkInput.text, false);
-                                            event.accepted = true;
+                                        Keys.onEscapePressed: root.leaveEditor()
+                                        Keys.onPressed: function (event) {
+                                            if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                                                root.moveTabFocus((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1);
+                                                event.accepted = true;
+                                                return;
+                                            }
+                                            if ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+                                                if (!root.backend.addLinksBusy)
+                                                    root.pendingLinkRequest = root.backend.addLinks(linkInput.text, false);
+                                                event.accepted = true;
+                                            }
                                         }
                                     }
                                 }
@@ -652,6 +680,33 @@ Panel {
         property bool grabber: false
         readonly property string uuid: String(item.uuid || "")
         readonly property bool confirming: root.removeTarget === (grabber ? "g:" : "d:") + uuid
+        readonly property bool editingName: grabber && root.renameTarget === uuid
+
+        function beginRename() {
+            root.removeTarget = "";
+            root.renameTarget = packageRow.uuid;
+            root.renameDraft = String(packageRow.item.name || "");
+            Qt.callLater(function () {
+                renameField.forceActiveFocus();
+            });
+        }
+
+        function finishRename(save) {
+            var newName = String(root.renameDraft || "").trim();
+            if (save && newName === "") {
+                root.keyboardHint = "Package name is required";
+                renameField.forceActiveFocus();
+                return;
+            }
+            if (save && root.backend)
+                root.backend.renameGrabberPackage(packageRow.uuid, newName);
+            root.renameTarget = "";
+            root.renameDraft = "";
+            root.renameEditorFocused = false;
+            Qt.callLater(function () {
+                renameButton.forceActiveFocus();
+            });
+        }
 
         color: Style.normalFillFor(root.foreground, Color.accent)
         borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
@@ -676,6 +731,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                        visible: !packageRow.editingName
                         width: parent.width
                         text: String(packageRow.item.name || "Unnamed package")
                         color: root.foreground
@@ -683,6 +739,33 @@ Panel {
                         font.pixelSize: Style.font.body
                         font.bold: packageRow.item.running === true
                         elide: Text.ElideMiddle
+                    }
+                    TextField {
+                        id: renameField
+                        visible: packageRow.editingName
+                        width: parent.width
+                        foreground: root.foreground
+                        verticalPadding: Style.space(2)
+                        text: packageRow.editingName ? root.renameDraft : ""
+                        placeholderText: "Package name"
+                        Accessible.name: "Rename LinkGrabber package"
+                        onTextChanged: if (packageRow.editingName)
+                            root.renameDraft = text
+                        onActiveFocusChanged: {
+                            root.renameEditorFocused = activeFocus;
+                            if (activeFocus) {
+                                root.focusedControl = renameField;
+                                root.keyboardHint = Accessible.name + " · Enter saves · Escape cancels";
+                            }
+                        }
+                        onAccepted: packageRow.finishRename(true)
+                        Keys.onEscapePressed: packageRow.finishRename(false)
+                        Keys.onPressed: function (event) {
+                            if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                                root.moveTabFocus((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1);
+                                event.accepted = true;
+                            }
+                        }
                     }
                     Text {
                         width: parent.width
@@ -699,6 +782,7 @@ Panel {
                     spacing: Style.space(2)
 
                     ActionButton {
+                        visible: !packageRow.editingName
                         iconText: packageRow.grabber ? "󰐊" : "󰐕"
                         tooltipText: packageRow.grabber ? "Move to downloads" : "Force download"
                         foreground: root.foreground
@@ -711,6 +795,31 @@ Panel {
                         }
                     }
                     ActionButton {
+                        id: renameButton
+                        visible: packageRow.grabber && !packageRow.editingName
+                        iconText: "󰏫"
+                        tooltipText: "Rename package"
+                        foreground: root.dim
+                        onClicked: packageRow.beginRename()
+                    }
+                    ActionButton {
+                        visible: packageRow.editingName
+                        iconText: "󰄬"
+                        tooltipText: "Save package name"
+                        foreground: root.foreground
+                        bordered: true
+                        enabled: String(root.renameDraft || "").trim() !== ""
+                        onClicked: packageRow.finishRename(true)
+                    }
+                    ActionButton {
+                        visible: packageRow.editingName
+                        iconText: "󰅖"
+                        tooltipText: "Cancel rename"
+                        foreground: root.dim
+                        onClicked: packageRow.finishRename(false)
+                    }
+                    ActionButton {
+                        visible: !packageRow.editingName
                         property bool destructiveAction: true
                         iconText: packageRow.confirming ? "󰄬" : "󰆴"
                         tooltipText: packageRow.confirming ? "Confirm removal" : (packageRow.grabber ? "Remove from LinkGrabber" : "Remove entry; keep files")

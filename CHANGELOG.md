@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Move compact playback controls to the top of the configured panel
+- Add inline LinkGrabber package renaming with keyboard save and cancel
+- Reduce the Add links editor to two visible lines with overflow scrolling
+
 ## [0.3.0] - 2026-08-30
 
 - Add complete panel keyboard navigation, accessible names, and visible input labels

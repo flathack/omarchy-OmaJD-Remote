@@ -24,7 +24,7 @@ machine.
 - Adds one or more URLs to LinkGrabber or directly to the download queue
 - Receives local Click'n'Load and encrypted CNL2 requests on `127.0.0.1:9666`
 - Keeps incoming Click'n'Load requests in a review inbox for the selected device
-- Moves or removes LinkGrabber packages
+- Renames, moves, or removes LinkGrabber packages
 - Removes download-list entries without deleting downloaded files
 - Uses a theme-aware vector mark with animated, paused, and offline states
 - Stores the MyJDownloader password in Secret Service, never in `shell.json`
@@ -69,9 +69,10 @@ You can also install the helper from a terminal:
 | `Escape` | Leave an editor, then close the panel |
 | `Ctrl+Enter` | Submit the link editor to LinkGrabber |
 
-The panel offers explicit controls for start, pause/resume, stop, force-start,
-LinkGrabber submission, queue movement, and removal. Removing a download entry
-keeps the downloaded file on disk.
+The panel keeps compact start, pause/resume, stop, and refresh controls at the
+top. It also offers explicit controls for force-start, LinkGrabber submission,
+package renaming, queue movement, and removal. Removing a download entry keeps
+the downloaded file on disk.
 
 ## Click'n'Load
 
