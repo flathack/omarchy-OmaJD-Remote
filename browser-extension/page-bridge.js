@@ -55,7 +55,7 @@
         reject(error);
       };
       const onAbort = () => cancel(abortError());
-      timeout = setTimeout(() => cancel(new TypeError("OmaJDownLoad did not answer")), timeoutMs);
+      timeout = setTimeout(() => cancel(new TypeError("OmaJD-Remote did not answer")), timeoutMs);
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
       pending.set(id, {
         resolve(value) { cleanup(); resolve(value); },
@@ -78,7 +78,7 @@
     const entry = pending.get(event.data.id);
     if (!entry) return;
     if (event.data.ok) entry.resolve(event.data);
-    else entry.reject(new TypeError(event.data.message || `OmaJDownLoad returned ${event.data.status}`));
+    else entry.reject(new TypeError(event.data.message || `OmaJD-Remote returned ${event.data.status}`));
   });
 
   const nativeFetch = window.fetch.bind(window);

@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Rename the application and plugin identity to OmaJD-Remote while retaining
+  compatibility with existing local configuration and Click'n'Load clients
+
 ## [0.4.0] - 2026-08-30
 
 - Make private JSON commits mode-safe, fsync-backed, and crash-consistent
@@ -62,9 +65,10 @@ All notable changes to this project will be documented in this file.
 - Download package progress and speed display
 - LinkGrabber URL submission, queue movement, and removal
 - One-click isolated helper installation
-- Animated theme-aware OmaJDownLoad mark
+- Animated theme-aware OmaJD-Remote mark
 
-[Unreleased]: https://github.com/flathack/omarchy-OmaJdownLoad/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/flathack/omarchy-OmaJdownLoad/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/flathack/omarchy-OmaJdownLoad/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/flathack/omarchy-OmaJdownLoad/releases/tag/v0.1.0
+[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/flathack/omarchy-OmaJD-Remote/releases/tag/v0.1.0

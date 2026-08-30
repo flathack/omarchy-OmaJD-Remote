@@ -7,8 +7,8 @@ import qs.Ui
 Panel {
     id: root
 
-    moduleName: "io.github.flathack.omajdownload"
-    ipcTarget: "io.github.flathack.omajdownload"
+    moduleName: "io.github.flathack.omajd-remote"
+    ipcTarget: "io.github.flathack.omajd-remote"
 
     property string removeTarget: ""
     property bool confirmForget: false
@@ -245,7 +245,7 @@ Panel {
 
                     PanelHero {
                         width: parent.width
-                        title: root.backend && root.backend.configured ? root.backend.selectedDeviceName : "OmaJDownLoad"
+                        title: root.backend && root.backend.configured ? root.backend.selectedDeviceName : "OmaJD-Remote"
                         meta: !root.backend ? "STARTING HELPER" : !root.backend.helperReady ? "ONE-TIME HELPER SETUP" : !root.backend.configured ? "MYJDOWNLOADER SETUP" : root.backend.connected ? (root.backend.controllerState + " · " + root.backend.speedText) : "OFFLINE"
                         detail: root.backend && root.backend.connected ? String(root.backend.activeDownloads) : ""
                         foreground: root.foreground
@@ -311,7 +311,7 @@ Panel {
 
                         Text {
                             width: parent.width
-                            text: "OmaJDownLoad uses an isolated Python helper for MyJDownloader's encrypted API. Install it once in your user profile."
+                            text: "OmaJD-Remote uses an isolated Python helper for MyJDownloader's encrypted API. Install it once in your user profile."
                             color: root.dim
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body

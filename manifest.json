@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.flathack.omajdownload",
-  "name": "omarchy-OmaJDownLoad",
+  "id": "io.github.flathack.omajd-remote",
+  "name": "omarchy-OmaJD-Remote",
   "version": "0.4.0",
   "author": "flathack",
   "description": "Control remote MyJDownloader devices and receive Click'n'Load from the Omarchy bar",
@@ -15,7 +15,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "OmaJDownLoad",
+    "displayName": "OmaJD-Remote",
     "description": "Remote downloads, LinkGrabber, and Click'n'Load control",
     "category": "System",
     "defaultSection": "center",

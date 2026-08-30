@@ -38,7 +38,7 @@
 
   <g font-family="JetBrains Mono, monospace">
     <text x="72" y="218" fill="#82dcff" font-size="15" font-weight="700" letter-spacing="3">OMARCHY QUATTRO PLUGIN</text>
-    <text x="68" y="283" fill="#f4f7ff" font-size="48" font-weight="700">OmaJDownLoad</text>
+    <text x="68" y="283" fill="#f4f7ff" font-size="48" font-weight="700">OmaJD-Remote</text>
     <text x="72" y="325" fill="#a8b0c2" font-size="20">remote downloads, right from the bar</text>
 
     <g transform="translate(72 382)" font-size="15">

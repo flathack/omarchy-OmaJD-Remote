@@ -1,8 +1,8 @@
-# OmaJDownLoad Click'n'Load browser companion
+# OmaJD-Remote Click'n'Load browser companion
 
 This optional Manifest V3 extension forwards Click'n'Load form, Fetch, and
-XMLHttpRequest submissions to the loopback-only OmaJDownLoad listener. It does
-not know or store MyJDownloader credentials and cannot bypass OmaJDownLoad's
+XMLHttpRequest submissions to the loopback-only OmaJD-Remote listener. It does
+not know or store MyJDownloader credentials and cannot bypass OmaJD-Remote's
 review inbox.
 
 Because Click'n'Load buttons can appear on arbitrary download pages, the two

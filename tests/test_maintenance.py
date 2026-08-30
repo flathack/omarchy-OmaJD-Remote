@@ -162,7 +162,7 @@ class BrowserPackagingTests(unittest.TestCase):
             shutil.copytree(PROJECT / "browser-extension", root / "browser-extension")
             script = root / "scripts" / "build-extension.sh"
             subprocess.run([str(script)], check=True, cwd=root, capture_output=True, text=True)
-            archive = root / "dist" / "omajdownload-clicknload-chromium.zip"
+            archive = root / "dist" / "omajd-remote-clicknload-chromium.zip"
             with zipfile.ZipFile(archive, "a") as package:
                 package.writestr("stale-review-artifact.js", "unexpected")
             subprocess.run([str(script)], check=True, cwd=root, capture_output=True, text=True)
@@ -182,7 +182,7 @@ class BrowserPackagingTests(unittest.TestCase):
             script = root / "scripts" / "build-extension.sh"
             environment = {**os.environ, "SOURCE_DATE_EPOCH": "1700000000"}
             subprocess.run([str(script)], check=True, cwd=root, env=environment, capture_output=True, text=True)
-            archive = root / "dist" / "omajdownload-clicknload-chromium.zip"
+            archive = root / "dist" / "omajd-remote-clicknload-chromium.zip"
             first = hashlib.sha256(archive.read_bytes()).hexdigest()
             os.utime(root / "browser-extension" / "page-bridge.js", (1900000000, 1900000000))
             subprocess.run([str(script)], check=True, cwd=root, env=environment, capture_output=True, text=True)

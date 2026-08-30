@@ -63,4 +63,4 @@ if ! "$environment_dir/bin/python" "$plugin_dir/scripts/prune_environments.py" "
   echo "Warning: superseded helper environments could not be pruned." >&2
 fi
 
-echo "OmaJDownLoad helper installed and verified in $environment_dir"
+echo "OmaJD-Remote helper installed and verified in $environment_dir"

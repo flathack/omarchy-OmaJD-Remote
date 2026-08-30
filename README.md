@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="assets/omajdownload-mark.svg" width="112" height="112" alt="OmaJDownLoad logo">
+  <img src="assets/omajd-remote-mark.svg" width="112" height="112" alt="OmaJD-Remote logo">
 </p>
 
-<h1 align="center">omarchy-OmaJDownLoad</h1>
+<h1 align="center">omarchy-OmaJD-Remote</h1>
 
 <p align="center">
   A native Omarchy Quattro bar controller for remote JDownloader instances.
 </p>
 
-![OmaJDownLoad preview](preview.png)
+![OmaJD-Remote preview](preview.png)
 
-OmaJDownLoad connects to devices registered with a
+OmaJD-Remote connects to devices registered with a
 [MyJDownloader](https://my.jdownloader.org/) account. JDownloader itself can
 run on a server, NAS, or in Docker; nothing has to be installed on the Omarchy
 machine.
@@ -40,10 +40,10 @@ machine.
 ## Install from GitHub
 
 ```bash
-omarchy plugin add https://github.com/flathack/omarchy-OmaJdownLoad.git --enable
+omarchy plugin add https://github.com/flathack/omarchy-OmaJD-Remote.git --enable
 ```
 
-Click the OmaJDownLoad icon in the bar, choose **Install helper**, then connect
+Click the OmaJD-Remote icon in the bar, choose **Install helper**, then connect
 your MyJDownloader account. The helper is installed into an isolated virtual
 environment in the user profile; no system package is modified. Every launch
 checks the installed distributions against the exact lock-file versions. A
@@ -56,7 +56,7 @@ direct and transitive dependency must still be present at its exact version.
 You can also install the helper from a terminal:
 
 ```bash
-~/.config/omarchy/plugins/io.github.flathack.omajdownload/install.sh
+~/.config/omarchy/plugins/io.github.flathack.omajd-remote/install.sh
 ```
 
 ## Controls
@@ -82,7 +82,7 @@ the downloaded file on disk.
 
 ## Click'n'Load
 
-While the plugin helper is running, OmaJDownLoad provides the standard local
+While the plugin helper is running, OmaJD-Remote provides the standard local
 Click'n'Load endpoints at `http://127.0.0.1:9666/flash/`, following the
 [JDownloader CNL2 protocol](https://jdownloader.org/knowledge/wiki/glossary/cnl2). Both plain CNL and
 encrypted CNL2 requests are supported. Incoming links are not started silently:
@@ -105,7 +105,7 @@ not evaluate website-provided code.
 
 ## Security and local data
 
-OmaJDownLoad runs inside the unsandboxed Omarchy shell, like every Omarchy
+OmaJD-Remote runs inside the unsandboxed Omarchy shell, like every Omarchy
 plugin. Review the source before enabling it.
 
 - Password: desktop Secret Service keyring
@@ -113,6 +113,10 @@ plugin. Review the source before enabling it.
 - Pending Click'n'Load inbox: `~/.config/omarchy/omajdownload/clicknload-inbox.json` (mode `0600`)
 - Python environment: `~/.local/share/omajdownload/venv`
 - API transport: encrypted MyJDownloader API over HTTPS
+
+The historical `omajdownload` data directory, environment variable, keyring
+attributes, and browser bridge identifiers are intentionally retained so an
+existing installation can be renamed without losing its account or inbox.
 
 Malformed configuration or inbox files are moved aside with a timestamped
 `.corrupt-*` suffix before fresh state is written, so their original content is
@@ -128,11 +132,11 @@ listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Remove
 
-First disconnect the account from the bottom of the OmaJDownLoad panel. This
+First disconnect the account from the bottom of the OmaJD-Remote panel. This
 removes its keyring entry and non-secret configuration. Then remove the plugin:
 
 ```bash
-omarchy plugin remove io.github.flathack.omajdownload
+omarchy plugin remove io.github.flathack.omajd-remote
 ```
 
 The isolated helper environment may be removed separately from
@@ -161,7 +165,7 @@ Pushing a matching tag such as `v0.4.0` reruns all checks, proves the browser
 ZIPs reproducible, publishes both archives, and attaches SHA-256 checksums.
 
 For live development, place a checkout at
-`~/.config/omarchy/plugins/io.github.flathack.omajdownload` and enable it.
+`~/.config/omarchy/plugins/io.github.flathack.omajd-remote` and enable it.
 Omarchy then hot-reloads QML changes.
 
 ## License

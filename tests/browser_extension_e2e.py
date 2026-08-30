@@ -36,7 +36,7 @@ sys.modules[SPEC.name] = jdctl
 SPEC.loader.exec_module(jdctl)
 
 
-PAGE = b"""<!doctype html><meta charset=utf-8><title>OmaJDownLoad fixture</title>
+PAGE = b"""<!doctype html><meta charset=utf-8><title>OmaJD-Remote fixture</title>
 <script>window.parserProbeResult = 'pending'</script>
 <script src="http://127.0.0.1:9666/jdcheck.js"
         onload="window.parserProbeResult = window.jdownloader === true ? 'loaded' : 'wrong'"
@@ -118,7 +118,7 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
             firefox.accept_insecure_certs = True
             firefox.add_argument("-headless")
             driver = webdriver.Firefox(options=firefox)
-            package = PROJECT / "dist" / "omajdownload-clicknload-firefox.zip"
+            package = PROJECT / "dist" / "omajd-remote-clicknload-firefox.zip"
             driver.install_addon(str(package), temporary=True)
             yield "firefox", driver
 

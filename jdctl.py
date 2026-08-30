@@ -26,7 +26,7 @@ import myjdapi
 from Crypto.Cipher import AES
 
 
-APP_KEY = "https://github.com/flathack/omarchy-OmaJdownLoad"
+APP_KEY = "https://github.com/flathack/omarchy-OmaJD-Remote"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy" / "omajdownload"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 INBOX_FILE = CONFIG_DIR / "clicknload-inbox.json"
@@ -268,7 +268,7 @@ class ClickNLoadServer:
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "OmaJDownLoad-CNL/1"
+            server_version = "OmaJD-Remote-CNL/1"
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return

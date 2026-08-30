@@ -1,6 +1,6 @@
 # Third-party notices
 
-OmaJDownLoad installs the following pinned Python packages into its isolated
+OmaJD-Remote installs the following pinned Python packages into its isolated
 user-level virtual environment. They are not vendored into this repository.
 
 | Package | Version | License |
@@ -14,8 +14,8 @@ user-level virtual environment. They are not vendored into this repository.
 | certifi | 2026.7.22 | MPL-2.0 |
 
 The package distributions contain their complete license texts. Their use does
-not imply endorsement of OmaJDownLoad by the respective authors.
+not imply endorsement of OmaJD-Remote by the respective authors.
 
 JDownloader and MyJDownloader are products and trademarks of AppWork GmbH.
-OmaJDownLoad is an independent community integration and is not affiliated
+OmaJD-Remote is an independent community integration and is not affiliated
 with or endorsed by AppWork GmbH.

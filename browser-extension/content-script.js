@@ -7,7 +7,7 @@ function showFailure(message) {
   const notice = document.createElement("div");
   notice.id = "omajdownload-cnl-error";
   notice.setAttribute("role", "alert");
-  notice.textContent = `OmaJDownLoad: ${message}`;
+  notice.textContent = `OmaJD-Remote: ${message}`;
   Object.assign(notice.style, {
     position: "fixed", top: "16px", left: "50%", transform: "translateX(-50%)",
     zIndex: "2147483647", padding: "10px 14px", borderRadius: "8px",

@@ -43,10 +43,10 @@ expected_members=$'content-script.js\nicons/\nicons/icon-128.png\nicons/icon-48.
 
 package_target() {
   local target="$1"
-  local destination="$output_dir/omajdownload-clicknload-$target.zip"
-  local built_archive="$build_root/omajdownload-clicknload-$target.zip"
+  local destination="$output_dir/omajd-remote-clicknload-$target.zip"
+  local built_archive="$build_root/omajd-remote-clicknload-$target.zip"
   local staged_archive
-  staged_archive="$(mktemp "$output_dir/.omajdownload-clicknload-$target.XXXXXX.zip")"
+  staged_archive="$(mktemp "$output_dir/.omajd-remote-clicknload-$target.XXXXXX.zip")"
   staged_archives+=("$staged_archive")
 
   (

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OmaJDownLoad Click'n'Load",
+  "name": "OmaJD-Remote Click'n'Load",
   "version": "0.4.0",
-  "description": "Forwards Click'n'Load buttons to the local OmaJDownLoad inbox.",
+  "description": "Forwards Click'n'Load buttons to the local OmaJD-Remote inbox.",
   "permissions": [],
   "host_permissions": [
     "http://127.0.0.1:9666/*",
@@ -30,7 +30,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "clicknload@omajdownload.flathack.github.io",
+      "id": "clicknload@omajd-remote.flathack.github.io",
       "strict_min_version": "128.0"
     }
   }

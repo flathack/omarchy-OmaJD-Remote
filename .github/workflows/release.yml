@@ -86,8 +86,8 @@ jobs:
           mkdir first-build
           cp dist/*.zip first-build/
           ./scripts/build-extension.sh
-          cmp first-build/omajdownload-clicknload-chromium.zip dist/omajdownload-clicknload-chromium.zip
-          cmp first-build/omajdownload-clicknload-firefox.zip dist/omajdownload-clicknload-firefox.zip
+          cmp first-build/omajd-remote-clicknload-chromium.zip dist/omajd-remote-clicknload-chromium.zip
+          cmp first-build/omajd-remote-clicknload-firefox.zip dist/omajd-remote-clicknload-firefox.zip
           git rev-parse HEAD > dist/SOURCE_REVISION
           (cd dist && sha256sum *.zip SOURCE_REVISION > SHA256SUMS)
       - name: Publish tagged artifacts
@@ -95,8 +95,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "$GITHUB_REF_NAME"
-          dist/omajdownload-clicknload-chromium.zip
-          dist/omajdownload-clicknload-firefox.zip
+          dist/omajd-remote-clicknload-chromium.zip
+          dist/omajd-remote-clicknload-firefox.zip
           dist/SHA256SUMS
           dist/SOURCE_REVISION
-          --verify-tag --generate-notes --title "OmaJDownLoad $GITHUB_REF_NAME"
+          --verify-tag --generate-notes --title "OmaJD-Remote $GITHUB_REF_NAME"

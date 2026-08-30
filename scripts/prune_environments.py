@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely prune superseded OmaJDownLoad virtual environments."""
+"""Safely prune superseded OmaJD-Remote virtual environments."""
 
 from __future__ import annotations
 

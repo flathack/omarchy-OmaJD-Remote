@@ -39,7 +39,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (method === "POST") {
         const tokenUrl = `${route.url.origin}/omajdownload/extension-token`;
         const tokenResponse = await fetch(tokenUrl, { cache: "no-store", credentials: "omit", signal: controller.signal });
-        if (!tokenResponse.ok) throw new Error("OmaJDownLoad extension handshake failed");
+        if (!tokenResponse.ok) throw new Error("OmaJD-Remote extension handshake failed");
         const token = await tokenResponse.text();
         const senderUrl = String(sender && (sender.url || (sender.tab && sender.tab.url)) || "");
         options.headers = {

@@ -8,7 +8,7 @@ URLs in an issue.
 
 ## Credential handling
 
-OmaJDownLoad stores passwords in the desktop Secret Service keyring through
+OmaJD-Remote stores passwords in the desktop Secret Service keyring through
 `secret-tool`. The QML interface sends a password to the helper over stdin;
 credentials are never passed as command-line arguments or written to plugin
 configuration.
