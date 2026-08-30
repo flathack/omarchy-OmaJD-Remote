@@ -59,7 +59,7 @@ class FormattingTests(unittest.TestCase):
 class CredentialTests(unittest.TestCase):
     @mock.patch("jdctl.subprocess.run")
     def test_secret_lookup_uses_stable_attributes(self, run):
-        run.return_value = mock.Mock(returncode=0, stdout="secret\n")
+        run.return_value = mock.Mock(returncode=0, stdout="secret\n", stderr="")
         self.assertEqual(jdctl.secret_lookup("me@example.com"), "secret")
         args = run.call_args.args[0]
         self.assertEqual(
@@ -75,6 +75,14 @@ class CredentialTests(unittest.TestCase):
         )
 
     @mock.patch("jdctl.subprocess.run")
+    def test_secret_lookup_distinguishes_missing_from_keyring_failure(self, run):
+        run.return_value = mock.Mock(returncode=1, stdout="", stderr="")
+        self.assertIsNone(jdctl.secret_lookup("missing@example.com"))
+        run.return_value = mock.Mock(returncode=1, stdout="", stderr="keyring locked")
+        with self.assertRaisesRegex(RuntimeError, "keyring locked"):
+            jdctl.secret_lookup("me@example.com")
+
+    @mock.patch("jdctl.subprocess.run")
     def test_secret_store_sends_password_over_stdin(self, run):
         run.return_value = mock.Mock(returncode=0, stderr="")
         jdctl.secret_store("me@example.com", "very-secret")
@@ -88,6 +96,41 @@ class CredentialTests(unittest.TestCase):
             jdctl.secret_clear("me@example.com")
 
 
+class StateWriterTests(unittest.TestCase):
+    def test_atomic_writer_is_private_under_permissive_umask_and_syncs(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            previous = os.umask(0o022)
+            try:
+                with mock.patch("jdctl.os.fsync", wraps=os.fsync) as fsync:
+                    jdctl.atomic_write_json(path, {"url": "https://private.example/token"})
+            finally:
+                os.umask(previous)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(fsync.call_count, 2)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["url"], "https://private.example/token")
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
+
+    def test_atomic_writer_does_not_replace_state_when_file_sync_fails(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text('{"old": true}\n', encoding="utf-8")
+            with mock.patch("jdctl.os.fsync", side_effect=OSError("sync failed")):
+                with self.assertRaisesRegex(OSError, "sync failed"):
+                    jdctl.atomic_write_json(path, {"new": True})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"old": True})
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
+
+    def test_atomic_writer_marks_directory_sync_failure_as_committed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            with mock.patch("jdctl.os.fsync", side_effect=[None, OSError("directory sync failed")]):
+                with self.assertRaises(jdctl.StateCommitError) as raised:
+                    jdctl.atomic_write_json(path, {"new": True})
+            self.assertTrue(raised.exception.committed)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"new": True})
+
+
 class PaginationTests(unittest.TestCase):
     def test_reads_every_package_page(self):
         packages = [{"uuid": index} for index in range(137)]
@@ -99,13 +142,42 @@ class PaginationTests(unittest.TestCase):
             start = params["startAt"]
             return packages[start:start + params["maxResults"]]
 
-        self.assertEqual(jdctl.query_all_packages(query, {"name": True}), packages)
+        result = jdctl.query_all_packages(query, {"name": True})
+        self.assertEqual(result.rows, packages)
+        self.assertFalse(result.truncated)
         self.assertEqual(calls, [(0, 60), (60, 60), (120, 60)])
 
     def test_repeated_page_is_rejected(self):
         page = [{"uuid": index} for index in range(jdctl.PACKAGE_PAGE_SIZE)]
         with self.assertRaisesRegex(RuntimeError, "repeated a page"):
             jdctl.query_all_packages(lambda _arguments: page, {})
+
+    def test_large_package_list_is_returned_as_truncated_not_an_error(self):
+        packages = [{"uuid": index} for index in range(121)]
+
+        def query(arguments):
+            params = arguments[0]
+            start = params["startAt"]
+            return packages[start:start + params["maxResults"]]
+
+        with mock.patch("jdctl.PACKAGE_MODEL_LIMIT", 120):
+            result = jdctl.query_all_packages(query, {})
+        self.assertEqual(len(result.rows), 120)
+        self.assertTrue(result.truncated)
+
+    def test_real_display_ceiling_and_one_additional_row(self):
+        for total, truncated in ((6000, False), (6001, True)):
+            with self.subTest(total=total):
+                packages = [{"uuid": index} for index in range(total)]
+
+                def query(arguments):
+                    params = arguments[0]
+                    start = params["startAt"]
+                    return packages[start:start + params["maxResults"]]
+
+                result = jdctl.query_all_packages(query, {})
+                self.assertEqual(len(result.rows), 6000)
+                self.assertEqual(result.truncated, truncated)
 
 
 class ClickNLoadTests(unittest.TestCase):
@@ -373,6 +445,105 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(action["command"], "add_links")
         self.assertEqual(action["request_id"], "links-17")
 
+    @mock.patch("jdctl.emit")
+    def test_manual_add_links_uncertainty_requires_explicit_retry(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        bridge.device = bridge.jd.device_objects["device-1"]
+        bridge.device.linkgrabber.add_links.side_effect = [TimeoutError("response lost"), None]
+        request_data = {
+            "command": "add_links", "request_id": "links-1",
+            "links": "https://example.test/file", "autostart": False,
+        }
+        with mock.patch.object(bridge, "snapshot"), mock.patch("jdctl.time.sleep"):
+            bridge.handle(dict(request_data))
+            uncertain = emit.call_args.args[0]
+            self.assertFalse(uncertain["ok"])
+            self.assertTrue(uncertain["uncertain"])
+            bridge.handle(dict(request_data, request_id="links-2"))
+            self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 1)
+            bridge.handle({
+                **request_data,
+                "command": "retry_add_links",
+                "request_id": "links-3",
+                "retry_token": uncertain["retry_token"],
+                "duplicate_confirmed": True,
+            })
+        self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 2)
+        self.assertTrue(emit.call_args.args[0]["ok"])
+
+    @mock.patch("jdctl.emit")
+    def test_device_selection_commit_failure_preserves_live_device(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com", "selected_device_id": "device-1"}
+        bridge.jd = FakeApi([
+            {"id": "device-1", "name": "One", "type": "jd"},
+            {"id": "device-2", "name": "Two", "type": "jd"},
+        ])
+        bridge.devices = bridge.jd.rows
+        bridge.device = bridge.jd.device_objects["device-1"]
+        bridge.active_device_id = "device-1"
+        with mock.patch.object(bridge, "persist_config", side_effect=OSError("read-only")):
+            bridge.handle({"command": "select_device", "device_id": "device-2"})
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertEqual(bridge.active_device_id, "device-1")
+        self.assertIs(bridge.device, bridge.jd.device_objects["device-1"])
+        self.assertEqual(bridge.selected_id, "device-1")
+
+    @mock.patch("jdctl.emit")
+    def test_package_refresh_failures_are_section_local_and_polling_reuses_cache(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        bridge.device = bridge.jd.device_objects["device-1"]
+        bridge.devices = bridge.jd.rows
+        bridge.active_device_id = "device-1"
+        bridge.last_device_refresh = jdctl.time.monotonic()
+        bridge.device.downloads.query_packages.side_effect = RuntimeError("downloads unavailable")
+        bridge.device.linkgrabber.query_packages.return_value = [{"uuid": "g1", "name": "Kept"}]
+        bridge.snapshot(refresh=True)
+        snapshot = emit.call_args.args[0]
+        self.assertTrue(snapshot["connected"])
+        self.assertIn("downloads unavailable", snapshot["download_error"])
+        self.assertEqual(snapshot["grabber"][0]["uuid"], "g1")
+        calls = bridge.device.linkgrabber.query_packages.call_count
+        bridge.snapshot(refresh=False)
+        self.assertEqual(bridge.device.linkgrabber.query_packages.call_count, calls)
+
+    @mock.patch("jdctl.emit")
+    def test_large_cached_package_lists_do_not_scale_five_second_polling(self, _emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com"}
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        bridge.device = bridge.jd.device_objects["device-1"]
+        bridge.devices = bridge.jd.rows
+        bridge.active_device_id = "device-1"
+        bridge.last_device_refresh = jdctl.time.monotonic()
+        packages = [{"uuid": str(index), "name": f"Package {index}"} for index in range(1001)]
+
+        def page(arguments):
+            params = arguments[0]
+            start = params["startAt"]
+            return packages[start:start + params["maxResults"]]
+
+        bridge.device.downloads.query_packages.side_effect = page
+        bridge.device.linkgrabber.query_packages.side_effect = page
+        bridge.snapshot(refresh=True)
+        initial_download_calls = bridge.device.downloads.query_packages.call_count
+        initial_grabber_calls = bridge.device.linkgrabber.query_packages.call_count
+        self.assertGreater(initial_download_calls, 1)
+        self.assertGreater(initial_grabber_calls, 1)
+
+        bridge.snapshot(refresh=False)
+        self.assertEqual(bridge.device.downloads.query_packages.call_count, initial_download_calls)
+        self.assertEqual(bridge.device.linkgrabber.query_packages.call_count, initial_grabber_calls)
+        self.assertEqual(bridge.device.downloadcontroller.get_current_state.call_count, 2)
+
+        bridge.snapshot(refresh=True)
+        self.assertGreater(bridge.device.downloads.query_packages.call_count, initial_download_calls)
+        self.assertGreater(bridge.device.linkgrabber.query_packages.call_count, initial_grabber_calls)
+
     def test_cnl_admission_is_durable_and_bounded(self):
         bridge = self.make_bridge()
         stored = []
@@ -384,6 +555,16 @@ class BridgeTests(unittest.TestCase):
         bridge.inbox = [{"id": str(index)} for index in range(jdctl.CNL_INBOX_LIMIT)]
         with self.assertRaises(OverflowError):
             bridge.admit_cnl({"links": ["https://example.test/overflow"]})
+
+    def test_cnl_admission_enforces_link_and_aggregate_byte_limits(self):
+        bridge = self.make_bridge()
+        with mock.patch("jdctl.CNL_REQUEST_LINK_LIMIT", 2):
+            with self.assertRaisesRegex(OverflowError, "more than 2 links"):
+                bridge.admit_cnl({"links": ["https://e.test/1", "https://e.test/2", "https://e.test/3"]})
+        bridge.inbox = [{"id": "old", "links": ["https://e.test/" + "x" * 100]}]
+        with mock.patch("jdctl.CNL_INBOX_BYTE_LIMIT", 150):
+            with self.assertRaisesRegex(OverflowError, "inbox exceeds"):
+                bridge.admit_cnl({"links": ["https://e.test/new"]})
 
     def test_cnl_inbox_survives_bridge_restart(self):
         with TemporaryDirectory() as directory:
@@ -411,7 +592,10 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(view["source"], "trusted.example")
         self.assertEqual(view["link_hosts"], ["cdn.example"])
         self.assertNotIn("secret", " ".join(view["link_hosts"]))
-        self.assertEqual(view["link_urls"], ["https://cdn.example/private/file?token=secret"])
+        self.assertNotIn("link_urls", view)
+        with mock.patch("jdctl.emit") as emit:
+            bridge.handle({"command": "cnl_details", "id": "review-1"})
+        self.assertEqual(emit.call_args.args[0]["link_urls"], ["https://cdn.example/private/file?token=secret"])
 
     def test_corrupt_inbox_is_quarantined_before_new_admission(self):
         with TemporaryDirectory() as directory:
@@ -567,12 +751,14 @@ class BridgeTests(unittest.TestCase):
         bridge = self.make_bridge()
         api = FakeApi([])
         with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
-                mock.patch("jdctl.secret_lookup", return_value=""), \
+                mock.patch("jdctl.secret_lookup", return_value=None), \
                 mock.patch("jdctl.secret_store") as store, \
                 mock.patch("jdctl.secret_clear") as clear, \
                 mock.patch("jdctl.write_config") as write, \
                 mock.patch.object(bridge, "snapshot"):
-            bridge.handle({"command": "configure", "email": "me@example.com", "password": "secret"})
+            configure_request = {"command": "configure", "email": "me@example.com", "password": "secret"}
+            bridge.handle(configure_request)
+            self.assertNotIn("password", configure_request)
             store.assert_called_once_with("me@example.com", "secret")
             write.assert_called_once()
             self.assertEqual(bridge.email, "me@example.com")
@@ -584,12 +770,19 @@ class BridgeTests(unittest.TestCase):
             self.assertGreaterEqual(clear.call_count, 2)
 
     @mock.patch("jdctl.emit")
+    def test_invalid_configuration_request_is_scrubbed(self, _emit):
+        bridge = self.make_bridge()
+        request_data = {"command": "configure", "email": "invalid", "password": "secret"}
+        bridge.handle(request_data)
+        self.assertNotIn("password", request_data)
+
+    @mock.patch("jdctl.emit")
     def test_configure_succeeds_with_warning_when_old_secret_cleanup_fails(self, emit):
         bridge = self.make_bridge()
         bridge.config = {"email": "old@example.com"}
         api = FakeApi([])
         with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
-                mock.patch("jdctl.secret_lookup", return_value=""), \
+                mock.patch("jdctl.secret_lookup", return_value=None), \
                 mock.patch("jdctl.secret_store"), \
                 mock.patch("jdctl.secret_clear", side_effect=RuntimeError("locked")), \
                 mock.patch("jdctl.write_config"), mock.patch.object(bridge, "snapshot"):
@@ -605,7 +798,7 @@ class BridgeTests(unittest.TestCase):
         bridge.config = {"email": "old@example.com"}
         api = FakeApi([])
         with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
-                mock.patch("jdctl.secret_lookup", return_value=""), \
+                mock.patch("jdctl.secret_lookup", return_value=None), \
                 mock.patch("jdctl.secret_store") as store, \
                 mock.patch("jdctl.secret_clear") as clear, \
                 mock.patch("jdctl.write_config", side_effect=OSError("read-only")):
@@ -614,6 +807,36 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.email, "old@example.com")
         store.assert_called_once_with("new@example.com", "secret")
         clear.assert_called_once_with("new@example.com")
+
+    @mock.patch("jdctl.emit")
+    def test_same_account_reconfigure_aborts_when_previous_secret_is_unknown(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "same@example.com"}
+        request_data = {"command": "configure", "email": "same@example.com", "password": "new-secret"}
+        with mock.patch("jdctl.secret_lookup", side_effect=RuntimeError("keyring locked")), \
+                mock.patch("jdctl.secret_store") as store:
+            bridge.handle(request_data)
+        store.assert_not_called()
+        self.assertFalse(emit.call_args.args[0]["ok"])
+        self.assertNotIn("password", request_data)
+
+    @mock.patch("jdctl.emit")
+    def test_same_account_config_commit_restores_previous_secret(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "same@example.com"}
+        api = FakeApi([])
+        with mock.patch("jdctl.myjdapi.Myjdapi", return_value=api), \
+                mock.patch("jdctl.secret_lookup", return_value="old-secret"), \
+                mock.patch("jdctl.secret_store") as store, \
+                mock.patch("jdctl.secret_clear") as clear, \
+                mock.patch("jdctl.write_config", side_effect=OSError("read-only")):
+            bridge.handle({"command": "configure", "email": "same@example.com", "password": "new-secret"})
+        self.assertEqual(store.call_args_list, [
+            mock.call("same@example.com", "new-secret"),
+            mock.call("same@example.com", "old-secret"),
+        ])
+        clear.assert_not_called()
+        self.assertFalse(emit.call_args.args[0]["ok"])
 
     @mock.patch("jdctl.emit")
     def test_forget_restores_config_when_secret_removal_fails(self, emit):

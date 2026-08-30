@@ -16,8 +16,6 @@ command -v sha256sum >/dev/null || {
 }
 
 lock_hash="$(sha256sum "$lock_file" | cut -d' ' -f1)"
-environment_dir="$data_root/.venv-$lock_hash"
-staging_dir="$data_root/.venv-$lock_hash.new.$PPID"
 backup_suffix="$(date +%s%N)-$$"
 command -v secret-tool >/dev/null || {
   echo "secret-tool is required (package: libsecret)." >&2
@@ -25,14 +23,21 @@ command -v secret-tool >/dev/null || {
 }
 
 mkdir -p "$data_root"
-if [[ -e "$staging_dir" ]]; then
-  echo "Staging environment already exists: $staging_dir" >&2
-  exit 1
-fi
+staging_dir="$(mktemp -d "$data_root/.venv-$lock_hash.new.XXXXXX")"
+environment_dir="$data_root/.venv-$lock_hash.installed.$backup_suffix"
+next_link="$data_root/.venv-link.$backup_suffix"
+legacy_backup=""
+environment_committed=0
 
 cleanup_staging() {
   if [[ -d "$staging_dir" ]]; then
     rm -rf -- "$staging_dir"
+  fi
+  if [[ -L "$next_link" ]]; then
+    rm -f -- "$next_link"
+  fi
+  if [[ "$environment_committed" == "0" && -n "$legacy_backup" && -d "$legacy_backup" && ! -e "$venv_dir" ]]; then
+    mv "$legacy_backup" "$venv_dir"
   fi
 }
 trap cleanup_staging EXIT
@@ -43,16 +48,16 @@ python -m venv "$staging_dir"
 "$staging_dir/bin/python" -c 'import myjdapi; from Crypto.Cipher import AES'
 printf '%s\n' "$lock_hash" > "$staging_dir/omajdownload-requirements.sha256"
 
-if [[ -e "$environment_dir" || -L "$environment_dir" ]]; then
-  mv "$environment_dir" "$environment_dir.broken.$backup_suffix"
-fi
 mv "$staging_dir" "$environment_dir"
 
 if [[ -d "$venv_dir" && ! -L "$venv_dir" ]]; then
-  mv "$venv_dir" "$data_root/venv.legacy.$backup_suffix"
+  legacy_backup="$data_root/venv.legacy.$backup_suffix"
+  mv "$venv_dir" "$legacy_backup"
+  touch "$legacy_backup"
 fi
-ln -sfn ".venv-$lock_hash" "$data_root/venv.next"
-mv -Tf "$data_root/venv.next" "$venv_dir"
+ln -s "$(basename "$environment_dir")" "$next_link"
+mv -Tf "$next_link" "$venv_dir"
+environment_committed=1
 
 if ! "$environment_dir/bin/python" "$plugin_dir/scripts/prune_environments.py" "$data_root" "$environment_dir"; then
   echo "Warning: superseded helper environments could not be pruned." >&2

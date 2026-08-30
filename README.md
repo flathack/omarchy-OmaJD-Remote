@@ -47,8 +47,9 @@ Click the OmaJDownLoad icon in the bar, choose **Install helper**, then connect
 your MyJDownloader account. The helper is installed into an isolated virtual
 environment in the user profile; no system package is modified. Every launch
 checks the installed distributions against the exact lock-file versions. A
-repair install switches environments atomically and retains only the newest
-rollback environment.
+repair install finalizes a uniquely named environment before atomically switching
+the active symlink and retains only the newest rollback environment. A failed
+repair leaves the previous helper selected.
 Additional packages in that isolated environment are tolerated; every locked
 direct and transitive dependency must still be present at its exact version.
 
@@ -87,8 +88,9 @@ Click'n'Load endpoints at `http://127.0.0.1:9666/flash/`, following the
 encrypted CNL2 requests are supported. Incoming links are not started silently:
 they appear in the panel first, where they can be sent to LinkGrabber, added and
 started, or dismissed. The current MyJDownloader device selection is used.
-Destination hostnames are shown by default; full URLs, including any embedded
-tokens, appear only after using the explicit reveal control.
+Destination hostnames are shown by default; a bounded preview of full URLs,
+including any embedded tokens, is loaded only after using the explicit reveal
+control. Request count, aggregate bytes, and link counts are bounded.
 If the remote submission succeeds but its local acknowledgement cannot be
 saved, the request is marked **uncertain** and cannot be sent again without an
 explicit duplicate-risk confirmation.
@@ -118,6 +120,8 @@ available for recovery.
 
 The password is passed from QML to the long-lived helper over stdin. It never
 appears in process arguments, plugin settings, logs, or `shell.json`.
+The helper removes the password field and raw input buffer immediately after
+the login attempt.
 
 Dependency versions and artifacts are hash-locked in `requirements.lock`; their licenses are
 listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -143,8 +147,17 @@ The isolated helper environment may be removed separately from
 
 `setup-dev.sh` creates a cached virtual environment from the hash lock and runs
 all Python, shell, manifest, browser-script, and plugin validation checks.
+CI additionally runs semantic QML checks against current Omarchy Quattro and
+real HTTPS extension fixtures in stable Chromium and Firefox.
+The QML runtime smoke test rejects load failures and QML `Warning`, `Critical`,
+`Fatal`, `ReferenceError`, and `TypeError` messages; only Quickshell
+infrastructure `INFO` output and platform-service `WARN` messages are allowed.
 The manual keyboard regression matrix is in
 [`docs/keyboard-testing.md`](docs/keyboard-testing.md).
+
+Releases use a single version across the plugin and both browser manifests.
+Pushing a matching tag such as `v0.4.0` reruns all checks, proves the browser
+ZIPs reproducible, publishes both archives, and attaches SHA-256 checksums.
 
 For live development, place a checkout at
 `~/.config/omarchy/plugins/io.github.flathack.omajdownload` and enable it.

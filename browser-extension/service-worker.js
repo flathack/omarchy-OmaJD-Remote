@@ -1,4 +1,5 @@
 const CNL_LIMIT = 1024 * 1024;
+const controllers = new Map();
 
 function clickNLoadRoute(value) {
   try {
@@ -15,6 +16,11 @@ function clickNLoadRoute(value) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === "omajdownload-cnl-cancel") {
+    const controller = controllers.get(String(message.requestId || ""));
+    if (controller) controller.abort();
+    return false;
+  }
   const route = message && message.type === "omajdownload-cnl" ? clickNLoadRoute(message.url) : null;
   const method = String(message && message.method || "POST").toUpperCase();
   if (!route || method !== route.method) return false;
@@ -25,11 +31,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   (async () => {
+    const requestId = String(message.requestId || "");
+    const controller = new AbortController();
+    if (requestId) controllers.set(requestId, controller);
     try {
-      const options = { method, cache: "no-store", credentials: "omit", headers: {} };
+      const options = { method, cache: "no-store", credentials: "omit", headers: {}, signal: controller.signal };
       if (method === "POST") {
         const tokenUrl = `${route.url.origin}/omajdownload/extension-token`;
-        const tokenResponse = await fetch(tokenUrl, { cache: "no-store", credentials: "omit" });
+        const tokenResponse = await fetch(tokenUrl, { cache: "no-store", credentials: "omit", signal: controller.signal });
         if (!tokenResponse.ok) throw new Error("OmaJDownLoad extension handshake failed");
         const token = await tokenResponse.text();
         const senderUrl = String(sender && (sender.url || (sender.tab && sender.tab.url)) || "");
@@ -45,6 +54,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: response.ok, status: response.status, body: responseBody });
     } catch (error) {
       sendResponse({ ok: false, status: 0, message: String(error && error.message || error) });
+    } finally {
+      if (requestId) controllers.delete(requestId);
     }
   })();
   return true;

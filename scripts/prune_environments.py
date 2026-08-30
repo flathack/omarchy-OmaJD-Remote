@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 
 
-OWNED = re.compile(r"(?:\.venv-[0-9a-f]{64}(?:\.broken\.[0-9-]+)?|venv\.legacy\.[0-9-]+)")
+OWNED = re.compile(
+    r"(?:\.venv-[0-9a-f]{64}(?:\.installed\.[0-9-]+|\.broken\.[0-9-]+)?|venv\.legacy\.[0-9-]+)"
+)
 
 
 def prune(root: Path, active: Path, keep_rollbacks: int = 1) -> list[Path]:

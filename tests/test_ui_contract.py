@@ -45,8 +45,23 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("origin_verified", self.widget)
         self.assertIn("Destinations · ", self.widget)
         self.assertIn("Show full download URLs", self.widget)
-        self.assertIn("link_urls", self.widget)
+        self.assertIn("cnlDetailsUrls", self.widget)
+        self.assertIn('command: "cnl_details"', self.service)
         self.assertIn("Previous submission may already have reached JDownloader", self.widget)
+
+    def test_rename_focus_is_rebound_after_model_refresh(self):
+        self.assertIn("function restoreRenameFocus()", self.widget)
+        self.assertIn("Qt.callLater(root.restoreRenameFocus)", self.widget)
+        self.assertIn("function focusRenameEditor()", self.widget)
+
+    def test_helper_crash_loop_has_backoff_and_manual_retry(self):
+        self.assertIn("helperRetryPaused", self.service)
+        self.assertIn("Math.min(60000", self.service)
+        self.assertIn("Retry JDownloader helper", self.widget)
+
+    def test_manual_add_links_uncertainty_is_explicit(self):
+        self.assertIn('command: retrying ? "retry_add_links" : "add_links"', self.service)
+        self.assertIn("may duplicate", self.widget)
 
 
 if __name__ == "__main__":

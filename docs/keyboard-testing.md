@@ -18,6 +18,8 @@ offline.
 | Offline account | Traverse the configured panel while no device is online | Panel stays configured, reports no online instance, and remains closable/navigable |
 | Click'n'Load inbox | Traverse accept, add-and-start, and dismiss actions | All three are keyboard reachable; dismiss affects only the focused request |
 | LinkGrabber rename | Focus a package rename action, edit, then use `Enter` or `Escape` | Enter sends the trimmed name for only that package; Escape cancels without a remote action; Tab and Shift+Tab leave the editor predictably |
+| Rename during refresh | Keep typing in a LinkGrabber rename field for more than 30 seconds and trigger manual refresh | Draft and text-field focus survive refresh; if the package disappears focus moves to a valid action |
+| Helper crash retry | Exercise repeated helper startup failure | Retry delays increase, automatic retries stop after five failures, and the manual retry action is keyboard reachable |
 | Setup | Fresh profile: traverse email, password, connect | Labels remain visible with placeholders filled; password does not appear in process arguments |
 
 Also verify mouse controls after the keyboard pass so focus handling does not

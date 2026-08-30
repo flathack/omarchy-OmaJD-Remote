@@ -10,7 +10,10 @@ function pageHarness({ failRequests = false } = {}) {
   const listeners = new Map();
   const captured = [];
   class MockFormData {
-    constructor(form) { this.values = form ? form.fields : []; }
+    constructor(form, submitter) {
+      this.values = form ? [...form.fields] : [];
+      if (submitter && submitter.name) this.values.push([submitter.name, submitter.value]);
+    }
     *entries() { yield* this.values; }
   }
   class MockForm {
@@ -18,8 +21,16 @@ function pageHarness({ failRequests = false } = {}) {
       this.action = action;
       this.method = "POST";
       this.fields = fields;
+      this.target = "";
+      this.listeners = new Map();
     }
     submit() { this.nativeSubmitted = true; }
+    addEventListener(type, callback) { this.listeners.set(type, callback); }
+    dispatchEvent(event) {
+      const callback = this.listeners.get(event.type);
+      if (callback) callback(event);
+      return true;
+    }
   }
   class MockXHR {
     constructor() { this.listeners = new Map(); }
@@ -42,6 +53,20 @@ function pageHarness({ failRequests = false } = {}) {
     get responseText() { return ""; }
     get response() { return ""; }
   }
+  class MockScript {
+    constructor() { this.attributes = new Map(); this.listeners = new Map(); }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) || ""; }
+    removeAttribute(name) { this.attributes.delete(name); }
+    addEventListener(type, callback) { this.listeners.set(type, callback); }
+    dispatchEvent(event) {
+      const callback = this.listeners.get(event.type);
+      if (callback) callback(event);
+      return true;
+    }
+    set src(value) { this.setAttribute("src", value); }
+    get src() { return this.getAttribute("src"); }
+  }
   class MockEvent { constructor(type) { this.type = type; } }
   class MockProgressEvent extends MockEvent {}
   const window = {
@@ -53,6 +78,7 @@ function pageHarness({ failRequests = false } = {}) {
     postMessage(data) {
       if (data.marker !== "omajdownload-cnl-request-v1") return;
       captured.push(data);
+      if (data.type === "cancel") return;
       const body = data.url.endsWith("jdcheck.js") ? "jdownloader=true;" : "success\r\n";
       queueMicrotask(() => {
         for (const callback of listeners.get("message") || []) {
@@ -71,16 +97,19 @@ function pageHarness({ failRequests = false } = {}) {
   const documentListeners = new Map();
   const document = {
     baseURI: "https://downloads.example/page",
-    addEventListener(type, callback) { documentListeners.set(type, callback); }
+    addEventListener(type, callback) { documentListeners.set(type, callback); },
+    querySelector() { return null; }
   };
+  class MockCustomEvent extends MockEvent { constructor(type, options = {}) { super(type); this.detail = options.detail; } }
   const context = vm.createContext({
     window, document, URL, URLSearchParams, Request, Response,
-    FormData: MockFormData, HTMLFormElement: MockForm,
-    XMLHttpRequest: MockXHR, Event: MockEvent, ProgressEvent: MockProgressEvent,
-    Promise, Map, String, Date, TypeError, setTimeout, clearTimeout, queueMicrotask
+    FormData: MockFormData, HTMLFormElement: MockForm, HTMLScriptElement: MockScript,
+    XMLHttpRequest: MockXHR, Event: MockEvent, ProgressEvent: MockProgressEvent, CustomEvent: MockCustomEvent,
+    AbortController, DOMException, Error,
+    Promise, Map, WeakSet, String, Date, TypeError, setTimeout, clearTimeout, queueMicrotask
   });
   vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/page-bridge.js"), "utf8"), context);
-  return { window, captured, documentListeners, MockForm };
+  return { window, captured, documentListeners, MockForm, MockScript };
 }
 
 test("page bridge preserves fetch(Request) bodies and original usability", async () => {
@@ -128,13 +157,17 @@ test("page bridge executes probe, form, and XHR transports", async () => {
   assert.equal(formPost.method, "POST");
 
   const submittedForm = new harness.MockForm("http://127.0.0.1:9666/flash/add", [["urls", "https://submit-event.example/file"]]);
+  const formCompleted = new Promise(resolve => submittedForm.addEventListener("omajdownload:success", resolve));
   let prevented = false;
   harness.documentListeners.get("submit")({
     target: submittedForm,
+    submitter: { name: "action", value: "clicknload" },
     preventDefault() { prevented = true; }
   });
   assert.equal(prevented, true);
+  await formCompleted;
   assert.ok(harness.captured.some(row => row.body.includes("submit-event.example")));
+  assert.ok(harness.captured.some(row => row.body.includes("action=clicknload")));
 
   const xhr = new harness.window.XMLHttpRequest();
   const events = [];
@@ -147,10 +180,44 @@ test("page bridge executes probe, form, and XHR transports", async () => {
   assert.deepEqual(events, ["readystatechange", "loadstart", "readystatechange", "readystatechange", "readystatechange", "load", "loadend"]);
 });
 
+test("page bridge cancels Fetch and XHR without late load events", async () => {
+  const harness = pageHarness();
+  const controller = new AbortController();
+  const pendingFetch = harness.window.fetch("http://127.0.0.1:9666/flash/add", {
+    method: "POST", body: "urls=cancelled", signal: controller.signal
+  });
+  controller.abort();
+  await assert.rejects(pendingFetch, error => error.name === "AbortError");
+
+  const xhr = new harness.window.XMLHttpRequest();
+  const events = [];
+  for (const name of ["load", "abort", "loadend"]) xhr.addEventListener(name, () => events.push(name));
+  const finished = new Promise(resolve => xhr.addEventListener("loadend", resolve));
+  xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  xhr.send("urls=cancelled-xhr");
+  xhr.abort();
+  await finished;
+  assert.deepEqual(events, ["abort", "loadend"]);
+  assert.equal(xhr.status, 0);
+  assert.equal(xhr.readyState, 0);
+  assert.ok(harness.captured.some(row => row.type === "cancel"));
+});
+
 test("page bridge reports the listener unavailable when its probe fails", async () => {
   const harness = pageHarness({ failRequests: true });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(harness.window.jdownloader, false);
+});
+
+test("page bridge handles programmatic jdcheck.js script probes", async () => {
+  const harness = pageHarness();
+  const script = new harness.MockScript();
+  const loaded = new Promise(resolve => script.addEventListener("load", resolve));
+  script.src = "http://127.0.0.1:9666/jdcheck.js";
+  await loaded;
+  assert.equal(harness.window.jdownloader, true);
+  assert.ok(harness.captured.some(row => row.url && row.url.endsWith("/jdcheck.js")));
+  assert.equal(script.getAttribute("src"), "");
 });
 
 test("service worker authenticates provenance and supports GET probes", async () => {
@@ -166,7 +233,7 @@ test("service worker authenticates provenance and supports GET probes", async ()
     if (targetFailure) throw new Error("listener stopped");
     return new Response(targetStatus === 200 ? "success\r\n" : "inbox full", { status: targetStatus });
   };
-  const context = vm.createContext({ chrome, fetch, URL, TextEncoder, String, Error, Response });
+  const context = vm.createContext({ chrome, fetch, URL, TextEncoder, String, Error, Response, AbortController, Map });
   vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/service-worker.js"), "utf8"), context);
 
   const invoke = (message) => new Promise(resolve => {

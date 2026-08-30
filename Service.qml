@@ -22,6 +22,10 @@ Item {
     property string speedText: "0 B/s"
     property var downloads: []
     property var grabber: []
+    property string downloadError: ""
+    property string grabberError: ""
+    property bool downloadsTruncated: false
+    property bool grabberTruncated: false
     property int activeDownloads: 0
     property bool cnlListening: false
     property int cnlPort: 9666
@@ -32,10 +36,22 @@ Item {
     property bool lastActionOk: true
     property bool addLinksBusy: false
     property string pendingAddLinksRequest: ""
+    property bool addLinksUncertain: false
+    property string addLinksRetryToken: ""
+    property string uncertainAddLinksText: ""
+    property bool uncertainAddLinksAutostart: false
+    property string cnlDetailsId: ""
+    property var cnlDetailsUrls: []
+    property int cnlDetailsHiddenCount: 0
     property int requestSequence: 0
     property int revision: 0
+    property int helperCrashCount: 0
+    property int helperRetryDelay: 2500
+    property bool helperRetryPaused: false
+    property string helperRetryStatus: ""
+    property double daemonStartedAt: 0
 
-    signal addLinksFinished(string requestId, bool ok)
+    signal addLinksFinished(string requestId, bool ok, bool uncertain)
 
     readonly property bool paused: controllerState.toUpperCase().indexOf("PAUSE") !== -1
     readonly property bool running: connected && (activeDownloads > 0 || controllerState.toUpperCase().indexOf("RUN") !== -1)
@@ -91,11 +107,17 @@ Item {
         if (addLinksBusy)
             return "";
         var requestId = "links-" + (++requestSequence);
+        var normalizedLinks = String(links || "").trim();
+        var retrying = addLinksUncertain && normalizedLinks === uncertainAddLinksText && autostart === uncertainAddLinksAutostart;
+        uncertainAddLinksText = normalizedLinks;
+        uncertainAddLinksAutostart = autostart === true;
         if (!send({
-            command: "add_links",
+            command: retrying ? "retry_add_links" : "add_links",
             request_id: requestId,
-            links: String(links || ""),
-            autostart: autostart === true
+            links: normalizedLinks,
+            autostart: autostart === true,
+            retry_token: retrying ? addLinksRetryToken : "",
+            duplicate_confirmed: retrying
         }))
             return "";
         addLinksBusy = true;
@@ -108,7 +130,9 @@ Item {
         var requestId = pendingAddLinksRequest;
         addLinksBusy = false;
         pendingAddLinksRequest = "";
-        addLinksFinished(requestId, false);
+        addLinksUncertain = true;
+        addLinksRetryToken = "";
+        addLinksFinished(requestId, false, true);
     }
     function moveGrabberPackage(uuid) {
         send({
@@ -154,6 +178,25 @@ Item {
             command: "cnl_reject",
             id: String(id || "")
         });
+    }
+    function requestClickNLoadDetails(id) {
+        send({
+            command: "cnl_details",
+            id: String(id || "")
+        });
+    }
+    function clearClickNLoadDetails() {
+        cnlDetailsId = "";
+        cnlDetailsUrls = [];
+        cnlDetailsHiddenCount = 0;
+    }
+    function retryHelper() {
+        helperRetryPaused = false;
+        helperCrashCount = 0;
+        helperRetryDelay = 2500;
+        helperRetryStatus = "";
+        if (helperPath !== "" && !daemon.running)
+            daemon.running = true;
     }
     function configure(email, password) {
         busy = true;
@@ -202,8 +245,20 @@ Item {
             controllerState = String(data.controller_state || (connected ? "IDLE" : "OFFLINE"));
             speed = Number(data.speed || 0);
             speedText = String(data.speed_text || "0 B/s");
-            downloads = data.downloads instanceof Array ? data.downloads : [];
-            grabber = data.grabber instanceof Array ? data.grabber : [];
+            var nextDownloads = data.downloads instanceof Array ? data.downloads : [];
+            var nextGrabber = data.grabber instanceof Array ? data.grabber : [];
+            if (JSON.stringify(downloads) !== JSON.stringify(nextDownloads))
+                downloads = nextDownloads;
+            if (JSON.stringify(grabber) !== JSON.stringify(nextGrabber))
+                grabber = nextGrabber;
+            downloadError = String(data.download_error || "");
+            grabberError = String(data.grabber_error || "");
+            downloadsTruncated = data.downloads_truncated === true;
+            grabberTruncated = data.grabber_truncated === true;
+            if (data.add_links_uncertain === true) {
+                addLinksUncertain = true;
+                addLinksRetryToken = String(data.add_links_retry_token || addLinksRetryToken);
+            }
             activeDownloads = Number(data.active_downloads || 0);
             lastError = String(data.error || "");
             busy = false;
@@ -219,10 +274,18 @@ Item {
                 lastError = actionStatus || "JDownloader action failed";
             else
                 lastError = "";
-            if (String(data.command || "") === "add_links") {
+            if (String(data.command || "") === "add_links" || String(data.command || "") === "retry_add_links") {
                 addLinksBusy = false;
                 pendingAddLinksRequest = "";
-                addLinksFinished(String(data.request_id || ""), lastActionOk);
+                addLinksUncertain = data.uncertain === true;
+                addLinksRetryToken = String(data.retry_token || "");
+                if (addLinksUncertain) {
+                    uncertainAddLinksText = String(data.links || uncertainAddLinksText);
+                } else if (lastActionOk) {
+                    uncertainAddLinksText = "";
+                    uncertainAddLinksAutostart = false;
+                }
+                addLinksFinished(String(data.request_id || ""), lastActionOk, addLinksUncertain);
             }
             statusReset.restart();
             return;
@@ -232,7 +295,19 @@ Item {
             cnlListening = data.listening === true;
             cnlPort = Number(data.port || 9666);
             cnlInbox = data.inbox instanceof Array ? data.inbox : [];
+            if (cnlDetailsId !== "" && !cnlInbox.some(function (item) {
+                return String(item.id || "") === cnlDetailsId;
+            }))
+                clearClickNLoadDetails();
             cnlError = String(data.error || "");
+            revision++;
+            return;
+        }
+
+        if (data.type === "cnl_details") {
+            cnlDetailsId = String(data.id || "");
+            cnlDetailsUrls = data.link_urls instanceof Array ? data.link_urls : [];
+            cnlDetailsHiddenCount = Number(data.hidden_link_count || 0);
             revision++;
             return;
         }
@@ -275,8 +350,24 @@ Item {
             root.connected = false;
             if (exitCode !== 0 && root.lastError === "")
                 root.lastError = "JDownloader helper exited (" + exitCode + ")";
-            if (!root.helperMissing)
-                restartTimer.restart();
+            if (root.helperMissing)
+                return;
+            var runtime = root.daemonStartedAt > 0 ? Date.now() - root.daemonStartedAt : 0;
+            root.helperCrashCount = runtime >= 60000 ? 1 : root.helperCrashCount + 1;
+            if (root.helperCrashCount >= 5) {
+                root.helperRetryPaused = true;
+                root.helperRetryStatus = "Automatic retries paused after 5 failures";
+                root.lastError = (root.lastError !== "" ? root.lastError + " · " : "") + "Automatic helper restart paused";
+                return;
+            }
+            root.helperRetryDelay = Math.min(60000, 2500 * Math.pow(2, root.helperCrashCount - 1));
+            root.helperRetryStatus = "Helper retry " + (root.helperCrashCount + 1) + " in " + (root.helperRetryDelay / 1000) + " s";
+            restartTimer.interval = root.helperRetryDelay;
+            restartTimer.restart();
+        }
+        onRunningChanged: if (running) {
+            root.daemonStartedAt = Date.now();
+            root.helperRetryStatus = "";
         }
     }
 
@@ -317,7 +408,7 @@ Item {
         id: restartTimer
         interval: 2500
         repeat: false
-        onTriggered: if (root.helperPath !== "" && !daemon.running)
+        onTriggered: if (root.helperPath !== "" && !daemon.running && !root.helperRetryPaused)
             daemon.running = true
     }
 

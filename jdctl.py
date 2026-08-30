@@ -12,9 +12,11 @@ import re
 import select
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -30,12 +32,17 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 INBOX_FILE = CONFIG_DIR / "clicknload-inbox.json"
 POLL_SECONDS = 5.0
 DEVICE_REFRESH_SECONDS = 15.0
+PACKAGE_REFRESH_SECONDS = 30.0
 PACKAGE_PAGE_SIZE = 60
-PACKAGE_PAGE_LIMIT = 100
+PACKAGE_MODEL_LIMIT = 6000
 CNL_HOST = "127.0.0.1"
 CNL_PORT = int(os.environ.get("OMAJDOWNLOAD_CNL_PORT", "9666"))
 CNL_BODY_LIMIT = 1024 * 1024
 CNL_INBOX_LIMIT = 30
+CNL_INBOX_BYTE_LIMIT = 4 * 1024 * 1024
+CNL_REQUEST_LINK_LIMIT = 2000
+CNL_INBOX_LINK_LIMIT = 5000
+CNL_DETAIL_LINK_LIMIT = 200
 CNL_KEY_PATTERN = re.compile(r"return\s+['\"]([0-9a-fA-F]{32})['\"]\s*;?", re.IGNORECASE)
 CNL_PENDING = "pending"
 CNL_SUBMITTING = "submitting"
@@ -46,6 +53,52 @@ class StateFileError(RuntimeError):
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
         self.path = path
+
+
+class StateCommitError(OSError):
+    def __init__(self, message: str, *, committed: bool) -> None:
+        super().__init__(message)
+        self.committed = committed
+
+
+@dataclass(frozen=True)
+class PackageQueryResult:
+    rows: list[dict[str, Any]]
+    truncated: bool = False
+
+
+def atomic_write_json(path: Path, data: Any, *, ensure_ascii: bool = True) -> None:
+    """Atomically and durably replace a private JSON state file."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    encoded = (json.dumps(data, ensure_ascii=ensure_ascii, indent=2) + "\n").encode("utf-8")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(temp_name)
+    replaced = False
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        replaced = True
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            try:
+                os.fsync(directory_fd)
+            except OSError as exc:
+                raise StateCommitError(f"Could not synchronize {path.name} directory entry: {exc}", committed=True) from exc
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not replaced:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -88,11 +141,7 @@ def read_config() -> dict[str, Any]:
 
 
 def write_config(data: dict[str, Any]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    temp = CONFIG_FILE.with_suffix(".tmp")
-    temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.chmod(temp, 0o600)
-    temp.replace(CONFIG_FILE)
+    atomic_write_json(CONFIG_FILE, data)
 
 
 def read_inbox() -> list[dict[str, Any]]:
@@ -108,11 +157,7 @@ def read_inbox() -> list[dict[str, Any]]:
 
 
 def write_inbox(data: list[dict[str, Any]]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    temp = INBOX_FILE.with_suffix(".tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(temp, 0o600)
-    temp.replace(INBOX_FILE)
+    atomic_write_json(INBOX_FILE, data, ensure_ascii=False)
 
 
 def quarantine_state_file(path: Path) -> Path:
@@ -321,9 +366,9 @@ class ClickNLoadServer:
         self.httpd = None
 
 
-def secret_lookup(email: str) -> str:
+def secret_lookup(email: str) -> str | None:
     if not email:
-        return ""
+        return None
     result = subprocess.run(
         ["secret-tool", "lookup", "omarchy-plugin", "omajdownload", "account", email],
         check=False,
@@ -331,7 +376,11 @@ def secret_lookup(email: str) -> str:
         text=True,
         timeout=10,
     )
-    return result.stdout.rstrip("\n") if result.returncode == 0 else ""
+    if result.returncode == 0:
+        return result.stdout.rstrip("\n")
+    if result.returncode == 1 and not result.stderr.strip():
+        return None
+    raise RuntimeError(result.stderr.strip() or f"Could not read password from the keyring (exit {result.returncode})")
 
 
 def secret_store(email: str, password: str) -> None:
@@ -368,10 +417,11 @@ def secret_clear(email: str) -> None:
         raise RuntimeError(result.stderr.strip() or "Could not remove password from the keyring")
 
 
-def query_all_packages(query: Any, fields: dict[str, Any]) -> list[dict[str, Any]]:
+def query_all_packages(query: Any, fields: dict[str, Any]) -> PackageQueryResult:
     rows: list[dict[str, Any]] = []
     seen_pages: set[tuple[str, ...]] = set()
-    for page in range(PACKAGE_PAGE_LIMIT):
+    page = 0
+    while len(rows) < PACKAGE_MODEL_LIMIT:
         params = dict(fields)
         params["maxResults"] = PACKAGE_PAGE_SIZE
         params["startAt"] = page * PACKAGE_PAGE_SIZE
@@ -384,8 +434,16 @@ def query_all_packages(query: Any, fields: dict[str, Any]) -> list[dict[str, Any
         seen_pages.add(signature)
         rows.extend(row for row in batch if isinstance(row, dict))
         if len(batch) < PACKAGE_PAGE_SIZE:
-            return rows
-    raise RuntimeError(f"JDownloader package list exceeds {PACKAGE_PAGE_SIZE * PACKAGE_PAGE_LIMIT} entries")
+            return PackageQueryResult(rows)
+        page += 1
+
+    params = dict(fields)
+    params["maxResults"] = 1
+    params["startAt"] = len(rows)
+    remainder = query([params]) or []
+    if not isinstance(remainder, list):
+        raise RuntimeError("JDownloader returned an invalid package list")
+    return PackageQueryResult(rows[:PACKAGE_MODEL_LIMIT], truncated=bool(remainder))
 
 
 def package_uuid(row: dict[str, Any]) -> str:
@@ -439,7 +497,15 @@ class Bridge:
         self.devices: list[dict[str, Any]] = []
         self.last_poll = 0.0
         self.last_device_refresh = 0.0
+        self.last_package_refresh = 0.0
         self.last_error = ""
+        self.cached_downloads: list[dict[str, Any]] = []
+        self.cached_grabber: list[dict[str, Any]] = []
+        self.download_error = ""
+        self.grabber_error = ""
+        self.downloads_truncated = False
+        self.grabber_truncated = False
+        self.uncertain_add_links: dict[str, Any] | None = None
         self.inbox_lock = threading.Lock()
         self.cnl_events: queue.Queue[dict[str, Any]] = queue.Queue()
         self.cnl_server = ClickNLoadServer(self.admit_cnl, self.cnl_events, port=cnl_port)
@@ -536,6 +602,9 @@ class Bridge:
         elif self.device is None or current_id != target:
             self.device = self.jd.get_device(device_id=target)
             self.device.disable_direct_connection()
+            self.cached_downloads = []
+            self.cached_grabber = []
+            self.last_package_refresh = 0.0
         self.active_device_id = target
         self.last_device_refresh = time.monotonic()
 
@@ -566,6 +635,10 @@ class Bridge:
         self.active_device_id = ""
         self.devices = []
 
+    @staticmethod
+    def inbox_item_size(item: dict[str, Any]) -> int:
+        return len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
     def inbox_view(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for item in self.inbox:
@@ -577,7 +650,6 @@ class Bridge:
                 "origin_verified": item.get("origin_verified") is True,
                 "link_hosts": hosts[:4],
                 "hidden_host_count": max(0, len(hosts) - 4),
-                "link_urls": [str(value) for value in item.get("links", [])],
                 "link_count": len(item.get("links", [])),
                 "encrypted": item.get("encrypted") is True,
                 "received_at": text(item.get("received_at")),
@@ -599,11 +671,25 @@ class Bridge:
             if len(self.inbox) >= CNL_INBOX_LIMIT:
                 raise OverflowError(f"Click'n'Load inbox is full ({CNL_INBOX_LIMIT} requests)")
             item = dict(payload)
+            links = item.get("links", [])
+            if len(links) > CNL_REQUEST_LINK_LIMIT:
+                raise OverflowError(f"Click'n'Load request has more than {CNL_REQUEST_LINK_LIMIT} links")
             item["id"] = uuid.uuid4().hex
             item["received_at"] = time.strftime("%H:%M")
             item["status"] = CNL_PENDING
             updated = [*self.inbox, item]
-            self.persist_inbox(updated)
+            total_links = sum(len(entry.get("links", [])) for entry in updated)
+            if total_links > CNL_INBOX_LINK_LIMIT:
+                raise OverflowError(f"Click'n'Load inbox exceeds {CNL_INBOX_LINK_LIMIT} links")
+            total_bytes = sum(self.inbox_item_size(entry) for entry in updated)
+            if total_bytes > CNL_INBOX_BYTE_LIMIT:
+                raise OverflowError(f"Click'n'Load inbox exceeds {human_bytes(CNL_INBOX_BYTE_LIMIT)}")
+            try:
+                self.persist_inbox(updated)
+            except StateCommitError as exc:
+                if exc.committed:
+                    self.inbox = updated
+                raise
             self.inbox = updated
         self.cnl_events.put({"accepted": True})
 
@@ -622,7 +708,7 @@ class Bridge:
         if changed:
             self.emit_cnl_state()
 
-    def snapshot(self, refresh: bool = True) -> None:
+    def snapshot(self, refresh: bool = False) -> None:
         configured = bool(self.email)
         if not configured:
             emit({
@@ -635,8 +721,14 @@ class Bridge:
                 "speed_text": "0 B/s",
                 "downloads": [],
                 "grabber": [],
+                "download_error": "",
+                "grabber_error": "",
+                "downloads_truncated": False,
+                "grabber_truncated": False,
                 "active_downloads": 0,
                 "error": self.state_warning,
+                "add_links_uncertain": self.uncertain_add_links is not None,
+                "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
             })
             return
 
@@ -658,36 +750,56 @@ class Bridge:
                     "speed_text": "0 B/s",
                     "downloads": [],
                     "grabber": [],
+                    "download_error": "",
+                    "grabber_error": "",
+                    "downloads_truncated": False,
+                    "grabber_truncated": False,
                     "active_downloads": 0,
                     "error": " · ".join(value for value in ("No online JDownloader instance was found", self.state_warning) if value),
+                    "add_links_uncertain": self.uncertain_add_links is not None,
+                    "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
                 })
                 return
             controller = text(self.device.downloadcontroller.get_current_state(), "IDLE")
             speed = number(self.device.downloadcontroller.get_speed_in_bytes())
-            download_rows = query_all_packages(self.device.downloads.query_packages, {
-                "bytesLoaded": True,
-                "bytesTotal": True,
-                "childCount": True,
-                "enabled": True,
-                "eta": True,
-                "finished": True,
-                "hosts": True,
-                "running": True,
-                "speed": True,
-                "status": True,
-            })
-            grabber_rows = query_all_packages(self.device.linkgrabber.query_packages, {
-                "availableOfflineCount": True,
-                "availableOnlineCount": True,
-                "bytesTotal": True,
-                "childCount": True,
-                "enabled": True,
-                "hosts": True,
-                "status": True,
-            })
-            downloads = [normalize_package(row, "download") for row in download_rows]
-            grabber = [normalize_package(row, "grabber") for row in grabber_rows]
-            active = sum(1 for item in downloads if item["running"])
+            packages_due = refresh or self.last_package_refresh == 0.0 \
+                or time.monotonic() - self.last_package_refresh >= PACKAGE_REFRESH_SECONDS
+            if packages_due:
+                try:
+                    download_result = query_all_packages(self.device.downloads.query_packages, {
+                        "bytesLoaded": True,
+                        "bytesTotal": True,
+                        "childCount": True,
+                        "enabled": True,
+                        "eta": True,
+                        "finished": True,
+                        "hosts": True,
+                        "running": True,
+                        "speed": True,
+                        "status": True,
+                    })
+                    self.cached_downloads = [normalize_package(row, "download") for row in download_result.rows]
+                    self.downloads_truncated = download_result.truncated
+                    self.download_error = ""
+                except Exception as exc:
+                    self.download_error = str(exc).strip() or "Could not refresh downloads"
+                try:
+                    grabber_result = query_all_packages(self.device.linkgrabber.query_packages, {
+                        "availableOfflineCount": True,
+                        "availableOnlineCount": True,
+                        "bytesTotal": True,
+                        "childCount": True,
+                        "enabled": True,
+                        "hosts": True,
+                        "status": True,
+                    })
+                    self.cached_grabber = [normalize_package(row, "grabber") for row in grabber_result.rows]
+                    self.grabber_truncated = grabber_result.truncated
+                    self.grabber_error = ""
+                except Exception as exc:
+                    self.grabber_error = str(exc).strip() or "Could not refresh LinkGrabber"
+                self.last_package_refresh = time.monotonic()
+            active = sum(1 for item in self.cached_downloads if item["running"])
             selected_name = next(
                 (item["name"] for item in self.devices if item["id"] == self.active_device_id),
                 "JDownloader",
@@ -702,10 +814,16 @@ class Bridge:
                 "controller_state": controller,
                 "speed": speed,
                 "speed_text": human_bytes(speed, "/s"),
-                "downloads": downloads,
-                "grabber": grabber,
+                "downloads": self.cached_downloads,
+                "grabber": self.cached_grabber,
+                "download_error": self.download_error,
+                "grabber_error": self.grabber_error,
+                "downloads_truncated": self.downloads_truncated,
+                "grabber_truncated": self.grabber_truncated,
                 "active_downloads": active,
                 "error": self.state_warning,
+                "add_links_uncertain": self.uncertain_add_links is not None,
+                "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
             })
             self.last_error = ""
         except Exception as exc:
@@ -724,11 +842,23 @@ class Bridge:
                 "speed_text": "0 B/s",
                 "downloads": [],
                 "grabber": [],
+                "download_error": "",
+                "grabber_error": "",
+                "downloads_truncated": False,
+                "grabber_truncated": False,
                 "active_downloads": 0,
                 "error": display_error,
+                "add_links_uncertain": self.uncertain_add_links is not None,
+                "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
             })
 
-    def action_result(self, ok: bool, message: str, request: dict[str, Any] | None = None) -> None:
+    def action_result(
+        self,
+        ok: bool,
+        message: str,
+        request: dict[str, Any] | None = None,
+        **details: Any,
+    ) -> None:
         source = request or {}
         emit({
             "type": "action",
@@ -736,6 +866,7 @@ class Bridge:
             "message": message,
             "command": text(source.get("command")),
             "request_id": text(source.get("request_id")),
+            **details,
         })
 
     def replace_inbox_item(self, item_id: str, status: str) -> dict[str, Any]:
@@ -750,7 +881,12 @@ class Bridge:
                 updated.append(item)
             if found is None:
                 raise RuntimeError("Click'n'Load request not found")
-            self.persist_inbox(updated)
+            try:
+                self.persist_inbox(updated)
+            except StateCommitError as exc:
+                if exc.committed:
+                    self.inbox = updated
+                raise
             self.inbox = updated
             return found
 
@@ -781,7 +917,13 @@ class Bridge:
                 raise RuntimeError("Previous submission outcome is uncertain; use the explicit submit-again action")
             raise RuntimeError(f"Click'n'Load request cannot be submitted from state {status}")
 
-        item = self.replace_inbox_item(item_id, CNL_SUBMITTING)
+        try:
+            item = self.replace_inbox_item(item_id, CNL_SUBMITTING)
+        except StateCommitError as exc:
+            persistence_warning = self.mark_cnl_uncertain(item_id)
+            self.emit_cnl_state()
+            self.action_result(False, f"Could not durably start Click'n'Load submission: {exc}{persistence_warning}", request)
+            return
         self.emit_cnl_state()
         links = "\r\n".join(str(value) for value in item.get("links", []))
         passwords = "\r\n".join(str(value) for value in item.get("passwords", [])) or None
@@ -810,7 +952,15 @@ class Bridge:
         try:
             with self.inbox_lock:
                 updated = [entry for entry in self.inbox if text(entry.get("id")) != item_id]
-                self.persist_inbox(updated)
+                try:
+                    self.persist_inbox(updated)
+                except StateCommitError as exc:
+                    if exc.committed:
+                        self.inbox = updated
+                        self.emit_cnl_state()
+                        self.action_result(False, f"Links reached JDownloader, but durable inbox removal is uncertain: {exc}", request)
+                        return
+                    raise
                 self.inbox = updated
         except OSError as exc:
             persistence_warning = self.mark_cnl_uncertain(item_id)
@@ -827,13 +977,13 @@ class Bridge:
     def handle(self, request: dict[str, Any]) -> None:
         command = text(request.get("command"))
         if command == "refresh":
-            self.snapshot()
+            self.snapshot(refresh=True)
             self.last_poll = time.monotonic()
             return
 
         if command == "configure":
             email = text(request.get("email")).strip()
-            password = text(request.get("password"))
+            password = text(request.pop("password", ""))
             if "@" not in email or not password:
                 self.action_result(False, "Please enter a valid email address and password", request)
                 return
@@ -844,11 +994,17 @@ class Bridge:
                 self.disconnect()
                 self.connect(email, password)
                 secret_store(email, password)
+                persistence_warning = ""
                 try:
                     self.persist_config(self.config)
+                except StateCommitError as exc:
+                    if exc.committed:
+                        persistence_warning = f"; configuration durability warning: {exc}"
+                    else:
+                        raise
                 except Exception:
                     try:
-                        if previous_target_secret:
+                        if previous_target_secret is not None:
                             secret_store(email, previous_target_secret)
                         else:
                             secret_clear(email)
@@ -861,7 +1017,11 @@ class Bridge:
                         secret_clear(old_email)
                     except (RuntimeError, subprocess.SubprocessError) as exc:
                         cleanup_warning = f"; old credential could not be removed: {str(exc).strip()}"
-                self.action_result(True, f"Connected to {len(self.devices)} JDownloader instance(s){cleanup_warning}", request)
+                self.action_result(
+                    True,
+                    f"Connected to {len(self.devices)} JDownloader instance(s){cleanup_warning}{persistence_warning}",
+                    request,
+                )
                 self.snapshot()
             except Exception as exc:
                 self.disconnect()
@@ -913,13 +1073,33 @@ class Bridge:
                     updated = [item for item in self.inbox if text(item.get("id")) != item_id]
                     removed = len(updated) != before
                     if removed:
-                        self.persist_inbox(updated)
+                        try:
+                            self.persist_inbox(updated)
+                        except StateCommitError as exc:
+                            if exc.committed:
+                                self.inbox = updated
+                            raise
                         self.inbox = updated
             except OSError as exc:
                 self.action_result(False, f"Could not remove Click'n'Load request: {exc}", request)
                 return
             self.action_result(removed, "Click'n'Load request removed" if removed else "Click'n'Load request not found", request)
             self.emit_cnl_state()
+            return
+
+        if command == "cnl_details":
+            item_id = text(request.get("id"))
+            current = next((entry for entry in self.inbox if text(entry.get("id")) == item_id), None)
+            if current is None:
+                self.action_result(False, "Click'n'Load request not found", request)
+                return
+            links = [str(value) for value in current.get("links", [])]
+            emit({
+                "type": "cnl_details",
+                "id": item_id,
+                "link_urls": links[:CNL_DETAIL_LINK_LIMIT],
+                "hidden_link_count": max(0, len(links) - CNL_DETAIL_LINK_LIMIT),
+            })
             return
 
         try:
@@ -932,12 +1112,25 @@ class Bridge:
                 device_id = text(request.get("device_id"))
                 if not any(item["id"] == device_id for item in self.devices):
                     raise RuntimeError("The selected JDownloader instance is not online")
-                self.device = self.jd.get_device(device_id=device_id)
-                self.device.disable_direct_connection()
+                candidate = self.jd.get_device(device_id=device_id)
+                candidate.disable_direct_connection()
+                updated_config = dict(self.config)
+                updated_config["selected_device_id"] = device_id
+                persistence_warning = ""
+                try:
+                    self.persist_config(updated_config)
+                except StateCommitError as exc:
+                    if exc.committed:
+                        persistence_warning = f"; selection durability warning: {exc}"
+                    else:
+                        raise
+                self.device = candidate
                 self.active_device_id = device_id
-                self.config["selected_device_id"] = device_id
-                self.persist_config(self.config)
-                self.action_result(True, "JDownloader instance selected", request)
+                self.config = updated_config
+                self.cached_downloads = []
+                self.cached_grabber = []
+                self.last_package_refresh = 0.0
+                self.action_result(True, "JDownloader instance selected" + persistence_warning, request)
             elif command == "control":
                 action = text(request.get("action"))
                 if action == "start":
@@ -955,21 +1148,58 @@ class Bridge:
                 ids = [str(value) for value in request.get("package_ids", [])]
                 self.device.downloads.force_download([], ids)
                 self.action_result(True, "Package started", request)
-            elif command == "add_links":
+            elif command in ("add_links", "retry_add_links"):
                 links = text(request.get("links")).strip()
                 if not links:
                     raise RuntimeError("Paste at least one download link")
                 autostart = request.get("autostart") is True
-                self.device.linkgrabber.add_links([{
-                    "autostart": autostart,
-                    "links": links,
-                    "packageName": None,
-                    "extractPassword": None,
-                    "priority": "DEFAULT",
-                    "downloadPassword": None,
-                    "destinationFolder": None,
-                    "overwritePackagizerRules": False,
-                }])
+                retry_token = text(request.get("retry_token"))
+                if command == "retry_add_links":
+                    uncertain = self.uncertain_add_links or {}
+                    valid_persisted_retry = bool(uncertain) \
+                        and retry_token == text(uncertain.get("token")) \
+                        and links == text(uncertain.get("links")) \
+                        and autostart is (uncertain.get("autostart") is True)
+                    if not valid_persisted_retry and request.get("duplicate_confirmed") is not True:
+                        raise RuntimeError("The uncertain Add Links request changed; review it before submitting as new")
+                elif self.uncertain_add_links is not None \
+                        and links == text(self.uncertain_add_links.get("links")) \
+                        and autostart is (self.uncertain_add_links.get("autostart") is True):
+                    self.action_result(
+                        False,
+                        "The previous submission may already have reached JDownloader; use Submit again",
+                        request,
+                        uncertain=True,
+                        retry_token=text(self.uncertain_add_links.get("token")),
+                    )
+                    return
+                try:
+                    self.device.linkgrabber.add_links([{
+                        "autostart": autostart,
+                        "links": links,
+                        "packageName": None,
+                        "extractPassword": None,
+                        "priority": "DEFAULT",
+                        "downloadPassword": None,
+                        "destinationFolder": None,
+                        "overwritePackagizerRules": False,
+                    }])
+                except Exception as exc:
+                    retry_token = uuid.uuid4().hex
+                    self.uncertain_add_links = {
+                        "token": retry_token,
+                        "links": links,
+                        "autostart": autostart,
+                    }
+                    self.action_result(
+                        False,
+                        "Add Links outcome is uncertain: " + (str(exc).strip() or exc.__class__.__name__),
+                        request,
+                        uncertain=True,
+                        retry_token=retry_token,
+                    )
+                    return
+                self.uncertain_add_links = None
                 self.action_result(True, "Links added" + (" and queued" if autostart else " to LinkGrabber"), request)
             elif command in ("cnl_accept", "cnl_retry"):
                 self.submit_cnl(request, retry=command == "cnl_retry")
@@ -996,13 +1226,13 @@ class Bridge:
                 raise RuntimeError("Unknown command")
 
             time.sleep(0.25)
-            self.snapshot()
+            self.snapshot(refresh=True)
             self.last_poll = time.monotonic()
         except Exception as exc:
             self.action_result(False, str(exc).strip() or "JDownloader action failed", request)
 
     def run(self) -> None:
-        self.snapshot()
+        self.snapshot(refresh=True)
         self.emit_cnl_state()
         self.last_poll = time.monotonic()
         while True:
@@ -1015,10 +1245,16 @@ class Bridge:
                     return
                 try:
                     request = json.loads(line)
+                    line = ""
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")
-                    self.handle(request)
+                    try:
+                        self.handle(request)
+                    finally:
+                        request.pop("password", None)
+                        request.clear()
                 except (json.JSONDecodeError, ValueError) as exc:
+                    line = ""
                     self.action_result(False, f"Invalid helper request: {exc}")
             elif time.monotonic() - self.last_poll >= POLL_SECONDS:
                 self.snapshot()

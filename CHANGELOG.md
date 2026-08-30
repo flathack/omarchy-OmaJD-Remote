@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-30
+
+- Make private JSON commits mode-safe, fsync-backed, and crash-consistent
+- Preserve existing keyring credentials across failed same-account replacement
+- Require explicit duplicate-risk retries for ambiguous manual Add Links calls
+- Bound Click'n'Load aggregate memory and load full URL previews only on demand
+- Decouple controller polling and package sections, with visible truncation/errors
+- Preserve LinkGrabber rename focus across model refreshes and back off helper crash loops
+- Complete form submitter, completion, cancellation, XHR timeout, and script-tag browser bridging
+- Add real Chromium/Firefox and semantic Omarchy QML CI jobs
+- Make helper switching failure-safe and browser ZIPs deterministic and concurrency-safe
+- Align plugin/browser version 0.4.0 and add a verified tag publication workflow
 - Move compact playback controls to the top of the configured panel
 - Add inline LinkGrabber package renaming with keyboard save and cancel
 - Reduce the Add links editor to two visible lines with overflow scrolling

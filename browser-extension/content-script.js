@@ -21,8 +21,13 @@ function showFailure(message) {
 window.addEventListener("message", event => {
   if (event.source !== window || !event.data || event.data.marker !== REQUEST_MARKER) return;
   const request = event.data;
+  if (request.type === "cancel") {
+    chrome.runtime.sendMessage({ type: "omajdownload-cnl-cancel", requestId: request.id });
+    return;
+  }
   chrome.runtime.sendMessage({
     type: "omajdownload-cnl",
+    requestId: request.id,
     url: request.url,
     method: request.method,
     body: request.body

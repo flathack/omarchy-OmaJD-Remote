@@ -5,6 +5,8 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$project_dir/browser-extension"
 output_dir="$project_dir/dist"
 build_root="$(mktemp -d)"
+source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$project_dir" log -1 --format=%ct 2>/dev/null || printf '315532800')}"
+staged_archives=()
 
 cleanup() {
   rm -rf -- "$build_root"
@@ -33,17 +35,25 @@ done
 cp "$source_dir/manifest.json" "$build_root/chromium/manifest.json"
 cp "$source_dir/manifest.firefox.json" "$build_root/firefox/manifest.json"
 
+find "$build_root/chromium" "$build_root/firefox" -type d -exec chmod 0755 {} +
+find "$build_root/chromium" "$build_root/firefox" -type f -exec chmod 0644 {} +
+find "$build_root/chromium" "$build_root/firefox" -exec touch -d "@$source_date_epoch" {} +
+
 expected_members=$'content-script.js\nicons/\nicons/icon-128.png\nicons/icon-48.png\nmanifest.json\npage-bridge.js\nservice-worker.js'
 
 package_target() {
   local target="$1"
   local destination="$output_dir/omajdownload-clicknload-$target.zip"
   local built_archive="$build_root/omajdownload-clicknload-$target.zip"
-  local staged_archive="$output_dir/.omajdownload-clicknload-$target.$PPID.zip"
+  local staged_archive
+  staged_archive="$(mktemp "$output_dir/.omajdownload-clicknload-$target.XXXXXX.zip")"
+  staged_archives+=("$staged_archive")
 
   (
     cd "$build_root/$target"
-    zip -qr "$built_archive" .
+    zip -Xq9 "$built_archive" \
+      content-script.js icons/ icons/icon-128.png icons/icon-48.png \
+      manifest.json page-bridge.js service-worker.js
   )
   actual_members="$(unzip -Z1 "$built_archive" | sort)"
   if [[ "$actual_members" != "$expected_members" ]]; then
@@ -56,7 +66,9 @@ package_target() {
 }
 
 cleanup_output() {
-  rm -f -- "$output_dir/.omajdownload-clicknload-chromium.$PPID.zip" "$output_dir/.omajdownload-clicknload-firefox.$PPID.zip"
+  if (( ${#staged_archives[@]} > 0 )); then
+    rm -f -- "${staged_archives[@]}"
+  fi
 }
 trap 'cleanup_output; cleanup' EXIT
 

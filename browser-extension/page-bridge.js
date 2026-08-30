@@ -31,16 +31,39 @@
     return String(body || "");
   }
 
-  function forward(route, body) {
+  function abortError(message = "The operation was aborted") {
+    if (typeof DOMException === "function") return new DOMException(message, "AbortError");
+    const error = new Error(message);
+    error.name = "AbortError";
+    return error;
+  }
+
+  function forward(route, body, { signal = null, timeoutMs = 10000 } = {}) {
     const id = `${Date.now()}-${++sequence}`;
+    if (signal && signal.aborted) return Promise.reject(abortError());
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      let timeout;
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        if (signal) signal.removeEventListener("abort", onAbort);
         pending.delete(id);
-        reject(new TypeError("OmaJDownLoad did not answer"));
-      }, 10000);
-      pending.set(id, { resolve, reject, timeout });
+      };
+      const cancel = error => {
+        if (!pending.has(id)) return;
+        cleanup();
+        window.postMessage({ marker: REQUEST_MARKER, type: "cancel", id }, "*");
+        reject(error);
+      };
+      const onAbort = () => cancel(abortError());
+      timeout = setTimeout(() => cancel(new TypeError("OmaJDownLoad did not answer")), timeoutMs);
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      pending.set(id, {
+        resolve(value) { cleanup(); resolve(value); },
+        reject(error) { cleanup(); reject(error); }
+      });
       window.postMessage({
         marker: REQUEST_MARKER,
+        type: "request",
         id,
         url: route.url,
         method: route.method,
@@ -54,8 +77,6 @@
     if (event.source !== window || !event.data || event.data.marker !== RESPONSE_MARKER) return;
     const entry = pending.get(event.data.id);
     if (!entry) return;
-    clearTimeout(entry.timeout);
-    pending.delete(event.data.id);
     if (event.data.ok) entry.resolve(event.data);
     else entry.reject(new TypeError(event.data.message || `OmaJDownLoad returned ${event.data.status}`));
   });
@@ -65,6 +86,7 @@
     const method = init.method || (input instanceof Request ? input.method : "GET");
     const route = cnlRoute(typeof input === "string" || input instanceof URL ? input : input.url, method);
     if (!route) return nativeFetch(input, init);
+    const signal = init.signal || (input instanceof Request ? input.signal : null);
     let bodyPromise = Promise.resolve("");
     if (route.method === "POST") {
       if (init.body !== undefined) bodyPromise = Promise.resolve(init.body);
@@ -76,26 +98,49 @@
         }
       }
     }
-    return bodyPromise.then(body => forward(route, body)).then(result => new Response(result.body || "success\r\n", {
+    return bodyPromise.then(body => forward(route, body, { signal })).then(result => new Response(result.body || "success\r\n", {
       status: result.status || 200,
       headers: { "Content-Type": route.url.endsWith("jdcheck.js") ? "application/javascript" : "text/plain; charset=utf-8" }
     }));
   };
 
+  function formData(form, submitter) {
+    if (submitter) {
+      try { return new FormData(form, submitter); } catch (_error) { /* older browser fallback */ }
+    }
+    return new FormData(form);
+  }
+
+  function formResult(form, ok, detail) {
+    const type = ok ? "omajdownload:success" : "omajdownload:error";
+    form.dispatchEvent(new CustomEvent(type, { detail }));
+    const target = String(form.target || "");
+    if (!target) return;
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(target) : target.replace(/["\\]/g, "\\$&");
+    const frame = document.querySelector(`iframe[name="${escaped}"]`);
+    if (frame && ok) frame.srcdoc = detail.body || "success\r\n";
+  }
+
+  function submitForm(form, submitter = null) {
+    const route = cnlRoute(form.action, form.method || "GET");
+    if (!route || route.method !== "POST") return false;
+    forward(route, formData(form, submitter)).then(
+      result => formResult(form, true, result),
+      error => formResult(form, false, { message: String(error && error.message || error) })
+    );
+    return true;
+  }
+
   document.addEventListener("submit", event => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
-    const route = cnlRoute(form.action, form.method || "GET");
-    if (!route || route.method !== "POST") return;
+    if (!submitForm(form, event.submitter || null)) return;
     event.preventDefault();
-    forward(route, new FormData(form)).catch(() => {});
   }, true);
 
   const nativeSubmit = HTMLFormElement.prototype.submit;
   HTMLFormElement.prototype.submit = function() {
-    const route = cnlRoute(this.action, this.method || "GET");
-    if (!route || route.method !== "POST") return nativeSubmit.call(this);
-    forward(route, new FormData(this)).catch(() => {});
+    if (!submitForm(this)) return nativeSubmit.call(this);
   };
 
   const NativeXHR = window.XMLHttpRequest;
@@ -104,6 +149,10 @@
       this.__omajRoute = cnlRoute(url, method);
       if (!this.__omajRoute) return super.open(method, url, ...rest);
       this.__omajReadyState = 1;
+      this.__omajStatus = 0;
+      this.__omajResponseText = "";
+      this.__omajAborted = false;
+      this.__omajFinished = false;
       this.dispatchEvent(new Event("readystatechange"));
     }
     setRequestHeader(name, value) {
@@ -111,8 +160,21 @@
     }
     send(body) {
       if (!this.__omajRoute) return super.send(body);
+      this.__omajController = new AbortController();
+      this.__omajAborted = false;
+      this.__omajFinished = false;
+      let timedOut = false;
+      let timeout;
+      if (this.timeout > 0) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          this.__omajController.abort();
+        }, this.timeout);
+      }
       this.dispatchEvent(new ProgressEvent("loadstart"));
-      forward(this.__omajRoute, body).then(result => {
+      forward(this.__omajRoute, body, { signal: this.__omajController.signal }).then(result => {
+        if (timeout) clearTimeout(timeout);
+        if (this.__omajFinished) return;
         this.__omajReadyState = 2;
         this.dispatchEvent(new Event("readystatechange"));
         this.__omajReadyState = 3;
@@ -120,23 +182,89 @@
         this.__omajStatus = result.status || 200;
         this.__omajResponseText = result.body || "success\r\n";
         this.__omajReadyState = 4;
+        this.__omajFinished = true;
         this.dispatchEvent(new Event("readystatechange"));
         this.dispatchEvent(new ProgressEvent("load"));
         this.dispatchEvent(new ProgressEvent("loadend"));
       }).catch(() => {
+        if (timeout) clearTimeout(timeout);
+        if (this.__omajFinished) return;
         this.__omajStatus = 0;
-        this.__omajReadyState = 4;
+        this.__omajReadyState = this.__omajAborted ? 0 : 4;
+        this.__omajFinished = true;
         this.dispatchEvent(new Event("readystatechange"));
-        this.dispatchEvent(new ProgressEvent("error"));
+        this.dispatchEvent(new ProgressEvent(timedOut ? "timeout" : (this.__omajAborted ? "abort" : "error")));
         this.dispatchEvent(new ProgressEvent("loadend"));
       });
     }
+    abort() {
+      if (!this.__omajRoute) return super.abort();
+      if (!this.__omajController || this.__omajFinished) return;
+      this.__omajAborted = true;
+      this.__omajController.abort();
+    }
     get readyState() { return this.__omajRoute ? (this.__omajReadyState || 0) : super.readyState; }
     get status() { return this.__omajRoute ? (this.__omajStatus || 0) : super.status; }
+    get statusText() { return this.__omajRoute ? (this.status === 200 ? "OK" : "") : super.statusText; }
     get responseText() { return this.__omajRoute ? (this.__omajResponseText || "") : super.responseText; }
     get response() { return this.__omajRoute ? (this.__omajResponseText || "") : super.response; }
+    get responseURL() { return this.__omajRoute ? this.__omajRoute.url : super.responseURL; }
+    getAllResponseHeaders() { return this.__omajRoute && this.status === 200 ? "content-type: text/plain; charset=utf-8\r\n" : super.getAllResponseHeaders(); }
+    getResponseHeader(name) {
+      if (!this.__omajRoute) return super.getResponseHeader(name);
+      return this.status === 200 && String(name).toLowerCase() === "content-type" ? "text/plain; charset=utf-8" : null;
+    }
   }
   window.XMLHttpRequest = OmaJDownLoadXHR;
+
+  const bridgedScripts = new WeakSet();
+  function bridgeProbeScript(script, value) {
+    const route = cnlRoute(value, "GET");
+    if (!route || !route.url.endsWith("/jdcheck.js") || bridgedScripts.has(script)) return false;
+    bridgedScripts.add(script);
+    script.removeAttribute("src");
+    forward(route, "").then(() => {
+      window.jdownloader = true;
+      script.dispatchEvent(new Event("load"));
+    }).catch(() => {
+      window.jdownloader = false;
+      script.dispatchEvent(new Event("error"));
+    }).finally(() => {
+      bridgedScripts.delete(script);
+    });
+    return true;
+  }
+
+  if (typeof HTMLScriptElement !== "undefined") {
+    const nativeSetAttribute = HTMLScriptElement.prototype.setAttribute;
+    HTMLScriptElement.prototype.setAttribute = function(name, value) {
+      if (String(name).toLowerCase() === "src" && bridgeProbeScript(this, value)) return;
+      return nativeSetAttribute.call(this, name, value);
+    };
+    const srcDescriptor = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, "src");
+    if (srcDescriptor && srcDescriptor.set) {
+      Object.defineProperty(HTMLScriptElement.prototype, "src", {
+        configurable: srcDescriptor.configurable,
+        enumerable: srcDescriptor.enumerable,
+        get: srcDescriptor.get,
+        set(value) {
+          if (!bridgeProbeScript(this, value)) srcDescriptor.set.call(this, value);
+        }
+      });
+    }
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(records => {
+        for (const record of records) {
+          for (const node of record.addedNodes || []) {
+            if (node instanceof HTMLScriptElement) bridgeProbeScript(node, node.getAttribute("src"));
+            if (node.querySelectorAll) {
+              for (const script of node.querySelectorAll("script[src]")) bridgeProbeScript(script, script.getAttribute("src"));
+            }
+          }
+        }
+      }).observe(document, { childList: true, subtree: true });
+    }
+  }
 
   const availabilityRoute = cnlRoute("http://127.0.0.1:9666/flash/", "GET");
   forward(availabilityRoute, "").then(() => {

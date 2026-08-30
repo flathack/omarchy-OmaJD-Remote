@@ -120,6 +120,24 @@ Panel {
         destructiveReset.stop();
     }
 
+    function restoreRenameFocus() {
+        if (renameTarget === "")
+            return;
+        for (var index = 0; index < grabberRepeater.count; index++) {
+            var row = grabberRepeater.itemAt(index);
+            if (row && row.uuid === renameTarget) {
+                row.focusRenameEditor();
+                return;
+            }
+        }
+        renameTarget = "";
+        renameDraft = "";
+        renameEditorFocused = false;
+        keyboardHint = "Renamed package is no longer available";
+        keyCatcher.forceActiveFocus();
+        moveTabFocus(1);
+    }
+
     BarIconButton {
         id: button
         anchors.fill: parent
@@ -253,6 +271,25 @@ Panel {
                         color: root.backend && root.backend.actionStatus !== "" ? (root.backend.lastActionOk ? root.dim : root.urgent) : root.urgent
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WordWrap
+                    }
+
+                    ActionButton {
+                        visible: root.backend && root.backend.helperRetryPaused
+                        text: "Retry JDownloader helper"
+                        iconText: "󰑓"
+                        foreground: root.foreground
+                        bordered: true
+                        onClicked: root.backend.retryHelper()
+                    }
+
+                    Text {
+                        visible: root.backend && root.backend.helperRetryStatus !== ""
+                        width: parent.width
+                        text: root.backend ? root.backend.helperRetryStatus : ""
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
                         wrapMode: Text.WordWrap
                     }
 
@@ -567,7 +604,7 @@ Panel {
                             Row {
                                 spacing: Style.space(6)
                                 ActionButton {
-                                    text: "To LinkGrabber"
+                                    text: root.backend && root.backend.addLinksUncertain && !root.backend.uncertainAddLinksAutostart && String(linkInput.text || "").trim() === root.backend.uncertainAddLinksText ? "Submit again (may duplicate)" : "To LinkGrabber"
                                     iconText: "󰌷"
                                     foreground: root.foreground
                                     bordered: true
@@ -577,7 +614,7 @@ Panel {
                                     }
                                 }
                                 ActionButton {
-                                    text: "Add & start"
+                                    text: root.backend && root.backend.addLinksUncertain && root.backend.uncertainAddLinksAutostart && String(linkInput.text || "").trim() === root.backend.uncertainAddLinksText ? "Start again (may duplicate)" : "Add & start"
                                     iconText: "󰐊"
                                     foreground: root.foreground
                                     bordered: true
@@ -603,6 +640,16 @@ Panel {
                                 text: "DOWNLOADS"
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
+                            }
+
+                            Text {
+                                visible: root.backend && (root.backend.downloadError !== "" || root.backend.downloadsTruncated)
+                                width: parent.width
+                                text: root.backend && root.backend.downloadError !== "" ? "Download list refresh failed · " + root.backend.downloadError : "Showing the first 6000 download packages"
+                                color: root.backend && root.backend.downloadError !== "" ? root.urgent : root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
                             }
 
                             Repeater {
@@ -632,7 +679,18 @@ Panel {
                                 fontFamily: root.fontFamily
                             }
 
+                            Text {
+                                visible: root.backend && (root.backend.grabberError !== "" || root.backend.grabberTruncated)
+                                width: parent.width
+                                text: root.backend && root.backend.grabberError !== "" ? "LinkGrabber refresh failed · " + root.backend.grabberError : "Showing the first 6000 LinkGrabber packages"
+                                color: root.backend && root.backend.grabberError !== "" ? root.urgent : root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+
                             Repeater {
+                                id: grabberRepeater
                                 model: root.backend ? root.backend.grabber : []
                                 PackageRow {
                                     required property var modelData
@@ -671,13 +729,16 @@ Panel {
     Connections {
         target: root.backend
         ignoreUnknownSignals: true
-        function onAddLinksFinished(requestId, ok) {
+        function onAddLinksFinished(requestId, ok, uncertain) {
             if (requestId === "" || requestId !== root.pendingLinkRequest)
                 return;
             if (ok)
                 linkInput.text = "";
-            else
+            else {
                 linkInput.forceActiveFocus();
+                if (uncertain)
+                    root.keyboardHint = "Previous submission may already have reached JDownloader · explicit retry may duplicate";
+            }
             root.pendingLinkRequest = "";
         }
         function onSelectedDeviceIdChanged() {
@@ -691,6 +752,8 @@ Panel {
         }
         function onGrabberChanged() {
             root.removeTarget = "";
+            if (root.renameTarget !== "")
+                Qt.callLater(root.restoreRenameFocus);
         }
     }
 
@@ -716,6 +779,13 @@ Panel {
             Qt.callLater(function () {
                 renameField.forceActiveFocus();
             });
+        }
+
+        function focusRenameEditor() {
+            if (!packageRow.editingName)
+                return;
+            renameField.forceActiveFocus();
+            root.renameEditorFocused = true;
         }
 
         function finishRename(save) {
@@ -956,7 +1026,7 @@ Panel {
                     Text {
                         visible: cnlRow.linksExpanded
                         width: parent.width
-                        text: cnlRow.item.link_urls instanceof Array ? cnlRow.item.link_urls.join("\n") : ""
+                        text: root.backend && root.backend.cnlDetailsId === String(cnlRow.item.id || "") ? root.backend.cnlDetailsUrls.join("\n") + (root.backend.cnlDetailsHiddenCount > 0 ? "\n… " + root.backend.cnlDetailsHiddenCount + " additional links not shown" : "") : "Loading URL preview…"
                         color: root.dim
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -982,7 +1052,13 @@ Panel {
                         iconText: cnlRow.linksExpanded ? "󰈈" : "󰈉"
                         tooltipText: cnlRow.linksExpanded ? "Hide full download URLs" : "Show full download URLs"
                         foreground: root.dim
-                        onClicked: cnlRow.linksExpanded = !cnlRow.linksExpanded
+                        onClicked: {
+                            cnlRow.linksExpanded = !cnlRow.linksExpanded;
+                            if (cnlRow.linksExpanded)
+                                root.backend.requestClickNLoadDetails(String(cnlRow.item.id || ""));
+                            else if (root.backend.cnlDetailsId === String(cnlRow.item.id || ""))
+                                root.backend.clearClickNLoadDetails();
+                        }
                     }
 
                     ActionButton {
