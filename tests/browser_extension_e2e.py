@@ -104,25 +104,23 @@ class BrowserExtensionEndToEndTests(unittest.TestCase):
         cls.temporary.cleanup()
 
     def browsers(self):
-        chrome = ChromeOptions()
-        chrome.add_argument("--no-sandbox")
-        chrome.add_argument("--disable-dev-shm-usage")
-        chrome.add_argument("--ignore-certificate-errors")
-        chrome.add_argument(f"--load-extension={PROJECT / 'browser-extension'}")
-        yield "chromium", webdriver.Chrome(options=chrome)
+        requested = os.environ.get("OMAJDOWNLOAD_E2E_BROWSER", "")
+        if requested in ("", "chromium"):
+            chrome = ChromeOptions()
+            chrome.add_argument("--no-sandbox")
+            chrome.add_argument("--disable-dev-shm-usage")
+            chrome.add_argument("--ignore-certificate-errors")
+            chrome.add_argument(f"--load-extension={PROJECT / 'browser-extension'}")
+            yield "chromium", webdriver.Chrome(options=chrome)
 
-        firefox = FirefoxOptions()
-        firefox.accept_insecure_certs = True
-        firefox.add_argument("-headless")
-        display = os.environ.pop("DISPLAY", None)
-        try:
+        if requested in ("", "firefox"):
+            firefox = FirefoxOptions()
+            firefox.accept_insecure_certs = True
+            firefox.add_argument("-headless")
             driver = webdriver.Firefox(options=firefox)
-        finally:
-            if display is not None:
-                os.environ["DISPLAY"] = display
-        package = PROJECT / "dist" / "omajdownload-clicknload-firefox.zip"
-        driver.install_addon(str(package), temporary=True)
-        yield "firefox", driver
+            package = PROJECT / "dist" / "omajdownload-clicknload-firefox.zip"
+            driver.install_addon(str(package), temporary=True)
+            yield "firefox", driver
 
     def test_https_form_fetch_xhr_script_probe_and_cnl2(self):
         for browser_name, driver in self.browsers():

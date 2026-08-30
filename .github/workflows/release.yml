@@ -53,7 +53,8 @@ jobs:
           Xvfb :99 -screen 0 1280x1024x24 &
           xvfb_pid=$!
           trap 'kill "$xvfb_pid"' EXIT
-          DISPLAY=:99 /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
+          OMAJDOWNLOAD_E2E_BROWSER=chromium DISPLAY=:99 /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
+          OMAJDOWNLOAD_E2E_BROWSER=firefox env -u DISPLAY /tmp/omajdownload-e2e/bin/python tests/browser_extension_e2e.py -v
 
   release:
     needs: [qml-semantic, browser-e2e]
