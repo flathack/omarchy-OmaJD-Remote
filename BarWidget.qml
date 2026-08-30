@@ -23,9 +23,40 @@ Panel {
     readonly property color dim: Qt.darker(foreground, 1.55)
     readonly property color urgent: bar ? bar.urgent : Color.urgent
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+    readonly property bool hasClickNLoadLinks: backend ? backend.cnlInbox.length > 0 : false
+    readonly property bool hasGrabberLinks: backend ? backend.grabber.length > 0 : false
+    readonly property int clickNLoadLinkCount: countLinks(backend ? backend.cnlInbox : [], "link_count")
+    readonly property int grabberLinkCount: countLinks(backend ? backend.grabber : [], "child_count")
+    readonly property string barStatusText: statusText()
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
+
+    function countLinks(items, countProperty) {
+        var total = 0;
+        for (var index = 0; index < items.length; index++) {
+            var count = Number(items[index][countProperty] || 0);
+            total += count > 0 ? count : 1;
+        }
+        return total;
+    }
+
+    function linkLabel(count, singular, plural) {
+        return count + " " + (count === 1 ? singular : plural);
+    }
+
+    function statusText() {
+        var states = [];
+        if (hasClickNLoadLinks)
+            states.push(linkLabel(clickNLoadLinkCount, "Click'n'Load link", "Click'n'Load links") + " awaiting review");
+        if (hasGrabberLinks)
+            states.push(linkLabel(grabberLinkCount, "LinkGrabber link", "LinkGrabber links") + " waiting");
+        if (states.length > 0)
+            return "OmaJD-Remote · " + states.join(" · ");
+        if (backend && backend.configured && !backend.connected)
+            return "OmaJD-Remote · JDownloader offline";
+        return "OmaJD-Remote";
+    }
 
     onOpenedChanged: {
         if (!opened) {
@@ -142,6 +173,8 @@ Panel {
         id: button
         anchors.fill: parent
         bar: root.bar
+        tooltipText: root.barStatusText
+        Accessible.name: root.barStatusText
         iconComponent: Component {
             DownloadMark {
                 anchors.centerIn: parent
@@ -153,6 +186,8 @@ Panel {
                 active: root.backend ? root.backend.running : false
                 paused: root.backend ? root.backend.paused : false
                 offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
+                inboxAttention: root.hasClickNLoadLinks && !root.opened
+                grabberWaiting: root.hasGrabberLinks
             }
         }
         onPressed: function (buttonCode) {
@@ -168,7 +203,7 @@ Panel {
     }
 
     Rectangle {
-        visible: root.backend && root.backend.cnlInbox.length > 0
+        visible: root.hasClickNLoadLinks
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.rightMargin: Style.space(1)
@@ -179,6 +214,17 @@ Panel {
         color: Color.accent
         border.width: 1
         border.color: Color.background
+    }
+
+    Rectangle {
+        visible: root.hasGrabberLinks
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Style.space(1)
+        width: Style.space(9)
+        height: Math.max(2, Style.space(2))
+        radius: height / 2
+        color: Color.accent
     }
 
     KeyboardPanel {

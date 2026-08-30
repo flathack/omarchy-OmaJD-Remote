@@ -9,11 +9,17 @@ Canvas {
     property bool active: false
     property bool paused: false
     property bool offline: false
+    property bool inboxAttention: false
+    property bool grabberWaiting: false
+    property bool motionEnabled: true
     property real phase: 0
+    property real attentionPulse: 0
 
     implicitWidth: 24
     implicitHeight: 24
     antialiasing: true
+    scale: root.inboxAttention && root.motionEnabled ? 1 + root.attentionPulse * 0.09 : 1
+    opacity: root.inboxAttention && root.motionEnabled ? 0.72 + root.attentionPulse * 0.28 : 1
 
     onForegroundChanged: requestPaint()
     onAccentChanged: requestPaint()
@@ -21,6 +27,12 @@ Canvas {
     onActiveChanged: requestPaint()
     onPausedChanged: requestPaint()
     onOfflineChanged: requestPaint()
+    onInboxAttentionChanged: {
+        if (!inboxAttention)
+            attentionPulse = 0;
+        requestPaint();
+    }
+    onGrabberWaitingChanged: requestPaint()
     onPhaseChanged: requestPaint()
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
@@ -31,6 +43,29 @@ Canvas {
         duration: 1700
         loops: Animation.Infinite
         running: root.active && !root.paused && !root.offline
+    }
+
+    SequentialAnimation on attentionPulse {
+        loops: Animation.Infinite
+        running: root.inboxAttention && root.motionEnabled
+
+        NumberAnimation {
+            from: 0
+            to: 1
+            duration: 520
+            easing.type: Easing.OutCubic
+        }
+
+        NumberAnimation {
+            from: 1
+            to: 0
+            duration: 620
+            easing.type: Easing.InOutSine
+        }
+
+        PauseAnimation {
+            duration: 380
+        }
     }
 
     onPaint: {
@@ -46,7 +81,7 @@ Canvas {
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
 
-        ctx.strokeStyle = root.offline ? Qt.darker(root.foreground, 1.65) : root.foreground;
+        ctx.strokeStyle = root.offline ? Qt.darker(root.foreground, 1.65) : (root.grabberWaiting ? root.accent : root.foreground);
         ctx.lineWidth = line;
         ctx.beginPath();
         if (root.active && !root.paused && !root.offline) {

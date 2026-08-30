@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 - Rename the application and plugin identity to OmaJD-Remote while retaining
   compatibility with existing local configuration and Click'n'Load clients
+- Pulse the bar icon for pending Click'n'Load reviews and show a persistent
+  accent state with link counts while LinkGrabber contains links
 
 ## [0.4.0] - 2026-08-30
 

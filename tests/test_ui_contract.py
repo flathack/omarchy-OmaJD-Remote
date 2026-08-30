@@ -63,6 +63,16 @@ class UiContractTests(unittest.TestCase):
         self.assertIn('command: retrying ? "retry_add_links" : "add_links"', self.service)
         self.assertIn("may duplicate", self.widget)
 
+    def test_bar_icon_distinguishes_clicknload_and_linkgrabber_attention(self):
+        mark = (PROJECT / "DownloadMark.qml").read_text(encoding="utf-8")
+        self.assertIn("inboxAttention: root.hasClickNLoadLinks && !root.opened", self.widget)
+        self.assertIn("grabberWaiting: root.hasGrabberLinks", self.widget)
+        self.assertIn("SequentialAnimation on attentionPulse", mark)
+        self.assertIn("root.grabberWaiting ? root.accent : root.foreground", mark)
+        self.assertIn("clickNLoadLinkCount", self.widget)
+        self.assertIn("grabberLinkCount", self.widget)
+        self.assertIn("Accessible.name: root.barStatusText", self.widget)
+
 
 if __name__ == "__main__":
     unittest.main()
