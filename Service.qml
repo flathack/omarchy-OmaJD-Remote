@@ -8,6 +8,7 @@ Item {
     property var manifest: null
 
     property bool configured: false
+    property bool connectionEnabled: true
     property bool connected: false
     property bool busy: false
     property bool helperReady: false
@@ -76,6 +77,18 @@ Item {
         send({
             command: "refresh"
         });
+    }
+    function setConnectionEnabled(enabled) {
+        if (busy || !configured)
+            return;
+        busy = true;
+        lastError = "";
+        actionStatus = enabled ? "Connecting to MyJDownloader…" : "Disconnecting from MyJDownloader…";
+        if (!send({
+            command: "set_connection_enabled",
+            enabled: enabled === true
+        }))
+            busy = false;
     }
     function selectDevice(id) {
         send({
@@ -265,6 +278,7 @@ Item {
             helperMissing = false;
             helperOutdated = false;
             configured = data.configured === true;
+            connectionEnabled = data.connection_enabled !== false;
             connected = data.connected === true;
             devices = data.devices instanceof Array ? data.devices : [];
             selectedDeviceId = String(data.selected_device_id || "");

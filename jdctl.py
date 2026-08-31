@@ -625,6 +625,10 @@ class Bridge:
     def selected_id(self) -> str:
         return text(self.config.get("selected_device_id"))
 
+    @property
+    def connection_enabled(self) -> bool:
+        return self.config.get("connection_enabled") is not False
+
     def refresh_devices(self, update: bool = True) -> None:
         if self.jd is None:
             self.devices = []
@@ -762,8 +766,35 @@ class Bridge:
             emit({
                 "type": "snapshot",
                 "configured": False,
+                "connection_enabled": True,
                 "connected": False,
                 "devices": [],
+                "controller_state": "OFFLINE",
+                "speed": 0,
+                "speed_text": "0 B/s",
+                "downloads": [],
+                "grabber": [],
+                "download_error": "",
+                "grabber_error": "",
+                "downloads_truncated": False,
+                "grabber_truncated": False,
+                "active_downloads": 0,
+                "error": self.state_warning,
+                "add_links_uncertain": self.uncertain_add_links is not None,
+                "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
+            })
+            return
+
+        if not self.connection_enabled:
+            self.disconnect()
+            emit({
+                "type": "snapshot",
+                "configured": True,
+                "connection_enabled": False,
+                "connected": False,
+                "devices": [],
+                "selected_device_id": self.selected_id,
+                "selected_device_name": "JDownloader",
                 "controller_state": "OFFLINE",
                 "speed": 0,
                 "speed_text": "0 B/s",
@@ -789,6 +820,7 @@ class Bridge:
                 emit({
                     "type": "snapshot",
                     "configured": True,
+                    "connection_enabled": True,
                     "connected": False,
                     "devices": self.devices,
                     "selected_device_id": self.active_device_id,
@@ -855,6 +887,7 @@ class Bridge:
             emit({
                 "type": "snapshot",
                 "configured": True,
+                "connection_enabled": True,
                 "connected": True,
                 "devices": self.devices,
                 "selected_device_id": self.active_device_id,
@@ -881,6 +914,7 @@ class Bridge:
             emit({
                 "type": "snapshot",
                 "configured": True,
+                "connection_enabled": True,
                 "connected": False,
                 "devices": self.devices,
                 "selected_device_id": self.selected_id,
@@ -1041,6 +1075,7 @@ class Bridge:
                 previous_target_secret = secret_lookup(email)
                 self.disconnect()
                 self.connect(email, password)
+                self.config["connection_enabled"] = True
                 secret_store(email, password)
                 persistence_warning = ""
                 try:
@@ -1085,6 +1120,41 @@ class Bridge:
                 self.action_result(False, str(exc).strip() or "MyJDownloader login failed", request)
             finally:
                 password = ""
+            return
+
+        if command == "set_connection_enabled":
+            if not self.email:
+                self.action_result(False, "Connect a MyJDownloader account first", request)
+                return
+            enabled = request.get("enabled") is True
+            updated_config = dict(self.config)
+            updated_config["connection_enabled"] = enabled
+            persistence_warning = ""
+            try:
+                self.persist_config(updated_config)
+            except StateCommitError as exc:
+                if exc.committed:
+                    persistence_warning = f"; connection setting durability warning: {exc}"
+                else:
+                    self.action_result(False, f"Could not save connection setting: {exc}", request)
+                    return
+            except OSError as exc:
+                self.action_result(False, f"Could not save connection setting: {exc}", request)
+                return
+            self.config = updated_config
+            if not enabled:
+                self.disconnect()
+                self.action_result(True, "MyJDownloader connection switched off" + persistence_warning, request)
+                self.snapshot()
+                return
+            try:
+                self.connect()
+                self.action_result(True, "MyJDownloader connection switched on" + persistence_warning, request)
+            except Exception as exc:
+                self.disconnect()
+                message = str(exc).strip() or "MyJDownloader connection failed"
+                self.action_result(False, message + persistence_warning, request)
+            self.snapshot()
             return
 
         if command == "forget":
@@ -1158,6 +1228,8 @@ class Bridge:
             return
 
         try:
+            if not self.connection_enabled:
+                raise RuntimeError("MyJDownloader connection is off; switch it on first")
             if self.jd is None:
                 self.connect()
             if self.device is None:

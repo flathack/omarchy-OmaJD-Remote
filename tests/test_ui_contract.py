@@ -79,6 +79,33 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("grabberLinkCount", self.widget)
         self.assertIn("Accessible.name: root.barStatusText", self.widget)
 
+    def test_connection_switch_is_persistent_keyboard_accessible_and_keeps_cnl_local(self):
+        helper = (PROJECT / "jdctl.py").read_text(encoding="utf-8")
+        self.assertIn("trailingControl: Component", self.widget)
+        self.assertIn("component ConnectionSwitch: Item", self.widget)
+        self.assertIn('Accessible.name: "MyJDownloader connection"', self.widget)
+        self.assertIn("activeFocusOnTab: true", self.widget)
+        self.assertIn("root.backend.setConnectionEnabled(!checked)", self.widget)
+        self.assertIn('command: "set_connection_enabled"', self.service)
+        self.assertIn('if command == "set_connection_enabled":', helper)
+        self.assertIn("if not self.connection_enabled:", helper)
+        action_guard = helper.index('raise RuntimeError("MyJDownloader connection is off; switch it on first")')
+        self.assertLess(helper.index('if command == "cnl_reject":'), action_guard)
+        self.assertLess(helper.index('if command == "cnl_details":'), action_guard)
+        self.assertIn("id: clickNLoadSection", self.widget)
+        self.assertIn("id: disconnectAccountButton", self.widget)
+
+    def test_connection_off_hides_every_remote_section(self):
+        self.assertIn("readonly property bool showRemoteSections", self.widget)
+        self.assertIn("backend.connectionEnabled === true", self.widget)
+        for section in ("transportSection", "addLinksSection", "downloadsSection", "grabberSection"):
+            marker = f"id: {section}\n                            visible: root.showRemoteSections"
+            self.assertIn(marker, self.widget)
+        self.assertGreaterEqual(self.widget.count("height: visible ? implicitHeight : 0"), 5)
+        self.assertIn("id: transportSeparator\n                            visible: root.showRemoteSections", self.widget)
+        self.assertIn("id: instanceSection\n                            visible: root.showRemoteSections", self.widget)
+        self.assertIn("function onConnectionEnabledChanged()", self.widget)
+
     def test_empty_package_refresh_errors_remain_visible(self):
         self.assertIn('root.backend.downloads.length > 0 || root.backend.downloadError !== ""', self.widget)
         self.assertIn('root.backend.grabber.length > 0 || root.backend.grabberError !== ""', self.widget)

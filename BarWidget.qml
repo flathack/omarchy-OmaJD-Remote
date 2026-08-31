@@ -27,6 +27,8 @@ Panel {
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
     readonly property bool hasClickNLoadLinks: backend ? backend.cnlInbox.length > 0 : false
     readonly property bool hasGrabberLinks: backend ? backend.grabber.length > 0 : false
+    readonly property bool showRemoteSections: backend ? backend.connectionEnabled === true : false
+    readonly property bool remoteControlsEnabled: backend && backend.connectionEnabled && !backend.busy
     readonly property int clickNLoadLinkCount: countLinks(backend ? backend.cnlInbox : [], "link_count")
     readonly property int grabberLinkCount: countLinks(backend ? backend.grabber : [], "child_count")
     readonly property string barStatusText: statusText()
@@ -55,6 +57,8 @@ Panel {
             states.push(linkLabel(grabberLinkCount, "LinkGrabber link", "LinkGrabber links") + " waiting");
         if (states.length > 0)
             return "OmaJD-Remote · " + states.join(" · ");
+        if (backend && backend.configured && !backend.connectionEnabled)
+            return "OmaJD-Remote · MyJDownloader connection off";
         if (backend && backend.configured && !backend.connected)
             return "OmaJD-Remote · JDownloader offline";
         return "OmaJD-Remote";
@@ -201,7 +205,7 @@ Panel {
         onPressed: function (buttonCode) {
             if (!root.backend)
                 return;
-            if (buttonCode === Qt.RightButton)
+            if (buttonCode === Qt.RightButton && root.backend.connectionEnabled)
                 root.backend.pauseDownloads(!root.backend.paused);
             else if (buttonCode === Qt.MiddleButton)
                 root.backend.refresh();
@@ -271,11 +275,11 @@ Panel {
             onTextKey: function (t) {
                 if (t === "r" || t === "R")
                     root.backend.refresh();
-                else if (t === "s" || t === "S")
+                else if ((t === "s" || t === "S") && root.remoteControlsEnabled)
                     root.backend.startDownloads();
-                else if (t === "p" || t === "P")
+                else if ((t === "p" || t === "P") && root.remoteControlsEnabled)
                     root.backend.pauseDownloads(!root.backend.paused);
-                else if ((t === "a" || t === "A") && root.backend && root.backend.configured)
+                else if ((t === "a" || t === "A") && root.remoteControlsEnabled)
                     linkInput.forceActiveFocus();
             }
 
@@ -300,7 +304,7 @@ Panel {
                     PanelHero {
                         width: parent.width
                         title: root.backend && root.backend.configured ? root.backend.selectedDeviceName : "OmaJD-Remote"
-                        meta: !root.backend ? "STARTING HELPER" : !root.backend.helperReady ? "ONE-TIME HELPER SETUP" : !root.backend.configured ? "MYJDOWNLOADER SETUP" : root.backend.connected ? (root.backend.controllerState + " · " + root.backend.speedText) : "OFFLINE"
+                        meta: !root.backend ? "STARTING HELPER" : !root.backend.helperReady ? "ONE-TIME HELPER SETUP" : !root.backend.configured ? "MYJDOWNLOADER SETUP" : !root.backend.connectionEnabled ? "CONNECTION OFF" : root.backend.connected ? (root.backend.controllerState + " · " + root.backend.speedText) : "OFFLINE"
                         detail: root.backend && root.backend.connected ? String(root.backend.activeDownloads) : ""
                         foreground: root.foreground
                         fontFamily: root.fontFamily
@@ -315,6 +319,9 @@ Panel {
                                 paused: root.backend ? root.backend.paused : false
                                 offline: root.backend ? (!root.backend.connected && root.backend.configured) : false
                             }
+                        }
+                        trailingControl: Component {
+                            ConnectionSwitch {}
                         }
                     }
 
@@ -464,6 +471,9 @@ Panel {
                         spacing: Style.space(12)
 
                         Column {
+                            id: transportSection
+                            visible: root.showRemoteSections
+                            height: visible ? implicitHeight : 0
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -483,6 +493,7 @@ Panel {
                                     bordered: true
                                     horizontalPadding: Style.space(7)
                                     verticalPadding: Style.space(4)
+                                    enabled: root.remoteControlsEnabled
                                     onClicked: root.backend.startDownloads()
                                 }
                                 ActionButton {
@@ -493,6 +504,7 @@ Panel {
                                     bordered: true
                                     horizontalPadding: Style.space(7)
                                     verticalPadding: Style.space(4)
+                                    enabled: root.remoteControlsEnabled
                                     onClicked: root.backend.pauseDownloads(!root.backend.paused)
                                 }
                                 ActionButton {
@@ -502,6 +514,7 @@ Panel {
                                     bordered: true
                                     horizontalPadding: Style.space(7)
                                     verticalPadding: Style.space(4)
+                                    enabled: root.remoteControlsEnabled
                                     onClicked: root.backend.stopDownloads()
                                 }
                                 ActionButton {
@@ -510,16 +523,20 @@ Panel {
                                     foreground: root.dim
                                     horizontalPadding: Style.space(7)
                                     verticalPadding: Style.space(4)
+                                    enabled: root.remoteControlsEnabled
                                     onClicked: root.backend.refresh()
                                 }
                             }
                         }
 
                         PanelSeparator {
+                            id: transportSeparator
+                            visible: root.showRemoteSections
                             foreground: root.foreground
                         }
 
                         Column {
+                            id: clickNLoadSection
                             width: parent.width
                             spacing: Style.space(7)
 
@@ -572,7 +589,9 @@ Panel {
                         }
 
                         Column {
-                            visible: root.backend && root.backend.devices.length > 1
+                            id: instanceSection
+                            visible: root.showRemoteSections && root.backend.devices.length > 1
+                            height: visible ? implicitHeight : 0
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -592,12 +611,16 @@ Panel {
                                     selected: String(modelData.id || "") === root.backend.selectedDeviceId
                                     foreground: root.foreground
                                     leftAlign: true
+                                    enabled: root.remoteControlsEnabled
                                     onClicked: root.backend.selectDevice(String(modelData.id || ""))
                                 }
                             }
                         }
 
                         Column {
+                            id: addLinksSection
+                            visible: root.showRemoteSections
+                            height: visible ? implicitHeight : 0
                             width: parent.width
                             spacing: Style.space(8)
 
@@ -632,6 +655,7 @@ Panel {
                                         font.pixelSize: Style.font.body
                                         wrapMode: TextEdit.WrapAnywhere
                                         activeFocusOnTab: true
+                                        enabled: root.remoteControlsEnabled
                                         Accessible.name: "Download links"
                                         background: null
                                         onActiveFocusChanged: if (activeFocus) {
@@ -662,7 +686,7 @@ Panel {
                                     iconText: "󰌷"
                                     foreground: root.foreground
                                     bordered: true
-                                    enabled: root.backend && !root.backend.addLinksBusy
+                                    enabled: root.remoteControlsEnabled && !root.backend.addLinksBusy
                                     onClicked: {
                                         root.pendingLinkRequest = root.backend.addLinks(linkInput.text, false);
                                     }
@@ -672,7 +696,7 @@ Panel {
                                     iconText: "󰐊"
                                     foreground: root.foreground
                                     bordered: true
-                                    enabled: root.backend && !root.backend.addLinksBusy
+                                    enabled: root.remoteControlsEnabled && !root.backend.addLinksBusy
                                     onClicked: {
                                         root.pendingLinkRequest = root.backend.addLinks(linkInput.text, true);
                                     }
@@ -681,12 +705,15 @@ Panel {
                         }
 
                         PanelSeparator {
-                            visible: root.backend && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
+                            id: downloadsSeparator
+                            visible: root.backend && root.backend.connectionEnabled && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
                             foreground: root.foreground
                         }
 
                         Column {
-                            visible: root.backend && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
+                            id: downloadsSection
+                            visible: root.showRemoteSections && (root.backend.downloads.length > 0 || root.backend.downloadError !== "" || root.backend.downloadsTruncated)
+                            height: visible ? implicitHeight : 0
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -718,12 +745,15 @@ Panel {
                         }
 
                         PanelSeparator {
-                            visible: root.backend && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
+                            id: grabberSeparator
+                            visible: root.backend && root.backend.connectionEnabled && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
                             foreground: root.foreground
                         }
 
                         Column {
-                            visible: root.backend && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
+                            id: grabberSection
+                            visible: root.showRemoteSections && (root.backend.grabber.length > 0 || root.backend.grabberError !== "" || root.backend.grabberTruncated)
+                            height: visible ? implicitHeight : 0
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -760,6 +790,7 @@ Panel {
                         }
 
                         ActionButton {
+                            id: disconnectAccountButton
                             property bool destructiveAction: true
                             text: root.confirmForget ? "Confirm account removal" : "Disconnect account"
                             iconText: root.confirmForget ? "󰅙" : "󰌺"
@@ -816,6 +847,14 @@ Panel {
         }
         function onConfiguredChanged() {
             root.resetDestructiveState();
+        }
+        function onConnectionEnabledChanged() {
+            root.resetDestructiveState();
+            if (!root.opened)
+                return;
+            root.focusedControl = null;
+            keyCatcher.forceActiveFocus();
+            Qt.callLater(function () { root.moveTabFocus(1); });
         }
         function onDownloadsChanged() {
             root.removeTarget = "";
@@ -1154,6 +1193,7 @@ Panel {
                         iconText: "󰌷"
                         tooltipText: cnlRow.uncertain ? "Submit again to LinkGrabber; may duplicate links" : "Send to LinkGrabber"
                         foreground: root.foreground
+                        enabled: root.remoteControlsEnabled
                         onClicked: {
                             root.cnlRejectTarget = "";
                             if (cnlRow.uncertain)
@@ -1167,6 +1207,7 @@ Panel {
                         iconText: "󰐊"
                         tooltipText: cnlRow.uncertain ? "Submit again and start; may duplicate downloads" : "Add and start"
                         foreground: root.foreground
+                        enabled: root.remoteControlsEnabled
                         onClicked: {
                             root.cnlRejectTarget = "";
                             if (cnlRow.uncertain)
@@ -1192,6 +1233,81 @@ Panel {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    component ConnectionSwitch: Item {
+        id: connectionSwitch
+
+        readonly property bool checked: root.backend ? root.backend.connectionEnabled : false
+        readonly property bool switching: root.backend ? root.backend.busy : false
+        readonly property string stateLabel: switching ? "WAIT" : (checked ? "ON" : "OFF")
+
+        visible: root.backend && root.backend.helperReady && root.backend.configured
+        enabled: visible && !switching
+        activeFocusOnTab: true
+        implicitWidth: Math.max(connectionToggle.implicitWidth, connectionState.implicitWidth)
+        implicitHeight: switchLayout.implicitHeight
+        Accessible.role: Accessible.CheckBox
+        Accessible.name: "MyJDownloader connection"
+        Accessible.description: checked ? "On" : "Off"
+        Accessible.checked: checked
+
+        function clicked() {
+            if (enabled && root.backend)
+                root.backend.setConnectionEnabled(!checked);
+        }
+
+        Keys.onPressed: function (event) {
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                connectionSwitch.clicked();
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                root.moveTabFocus((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1);
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Up) {
+                root.moveTabFocus(-1);
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Right || event.key === Qt.Key_Down) {
+                root.moveTabFocus(1);
+                event.accepted = true;
+            } else if (event.key === Qt.Key_Escape) {
+                root.close();
+                event.accepted = true;
+            }
+        }
+
+        onActiveFocusChanged: if (activeFocus) {
+            root.focusedControl = connectionSwitch;
+            root.keyboardHint = "MyJDownloader connection · " + (checked ? "On" : "Off");
+            Qt.callLater(root.ensureFocusVisible);
+        }
+
+        Column {
+            id: switchLayout
+            anchors.centerIn: parent
+            spacing: Style.space(1)
+
+            Text {
+                id: connectionState
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: connectionSwitch.stateLabel
+                color: connectionSwitch.checked ? Color.accent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 0.8
+            }
+
+            ToggleSwitch {
+                id: connectionToggle
+                anchors.horizontalCenter: parent.horizontalCenter
+                checked: connectionSwitch.checked
+                busy: connectionSwitch.switching
+                hasCursor: connectionSwitch.activeFocus
+                trackHeight: Style.space(18)
+                onToggled: connectionSwitch.clicked()
             }
         }
     }

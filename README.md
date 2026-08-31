@@ -19,6 +19,7 @@ machine.
 
 - Discovers all online JDownloader devices in the account
 - Switches between devices and remembers the selection
+- Switches the MyJDownloader connection on or off without removing the account
 - Starts, pauses, resumes, stops, and force-starts downloads
 - Shows package progress, transfer speed, and current controller state
 - Adds one or more URLs to LinkGrabber or directly to the download queue
@@ -76,7 +77,12 @@ You can also install the helper from a terminal:
 | `Ctrl+Enter` | Submit the link editor to LinkGrabber |
 
 The panel keeps compact start, pause/resume, stop, and refresh controls at the
-top. It also offers explicit controls for force-start, LinkGrabber submission,
+top. Its upper-right switch disconnects or reconnects MyJDownloader and remembers
+that choice across restarts. While switched off, remote actions are disabled but
+the local Click'n'Load listener continues collecting requests for later review.
+The OFF view hides all remote-control sections and keeps only Click'n'Load and
+the account-disconnect action beneath the header.
+The panel also offers explicit controls for force-start, LinkGrabber submission,
 package renaming, queue movement, and removal. Removing a download entry keeps
 the downloaded file on disk.
 

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-31
+
+- Add a persistent, keyboard-accessible MyJDownloader connection switch to the
+  panel header while keeping the local Click'n'Load inbox available offline;
+  the OFF view hides all unrelated remote-control sections
+
 ## [0.5.1] - 2026-08-31
 
 - Keep the browser companion manifest source distinct from the root Omarchy
@@ -87,7 +93,8 @@ All notable changes to this project will be documented in this file.
 - One-click isolated helper installation
 - Animated theme-aware OmaJD-Remote mark
 
-[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.3.0...v0.4.0

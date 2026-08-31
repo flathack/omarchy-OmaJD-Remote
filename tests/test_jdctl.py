@@ -447,6 +447,61 @@ class BridgeTests(unittest.TestCase):
         lookup.assert_not_called()
         self.assertTrue(emit.call_args.args[0]["connected"])
 
+    @mock.patch("jdctl.emit")
+    def test_disabled_connection_snapshot_never_reconnects(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {
+            "email": "me@example.com",
+            "selected_device_id": "device-1",
+            "connection_enabled": False,
+        }
+        bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+        with mock.patch.object(bridge, "connect") as connect:
+            bridge.snapshot(refresh=True)
+        connect.assert_not_called()
+        self.assertIsNone(bridge.jd)
+        snapshot = emit.call_args.args[0]
+        self.assertTrue(snapshot["configured"])
+        self.assertFalse(snapshot["connection_enabled"])
+        self.assertFalse(snapshot["connected"])
+
+    @mock.patch("jdctl.emit")
+    def test_connection_switch_persists_off_and_disconnects(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com", "connection_enabled": True}
+        bridge.jd = FakeApi([])
+        with mock.patch.object(bridge, "persist_config") as persist, \
+                mock.patch.object(bridge, "snapshot") as snapshot:
+            bridge.handle({"command": "set_connection_enabled", "enabled": False})
+        persist.assert_called_once_with({"email": "me@example.com", "connection_enabled": False})
+        snapshot.assert_called_once_with()
+        self.assertFalse(bridge.connection_enabled)
+        self.assertIsNone(bridge.jd)
+        self.assertTrue(emit.call_args.args[0]["ok"])
+
+    @mock.patch("jdctl.emit")
+    def test_connection_switch_save_failure_keeps_live_connection(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com", "connection_enabled": True}
+        bridge.jd = FakeApi([])
+        live_api = bridge.jd
+        with mock.patch.object(bridge, "persist_config", side_effect=OSError("read-only")):
+            bridge.handle({"command": "set_connection_enabled", "enabled": False})
+        self.assertTrue(bridge.connection_enabled)
+        self.assertIs(bridge.jd, live_api)
+        self.assertFalse(emit.call_args.args[0]["ok"])
+
+    @mock.patch("jdctl.emit")
+    def test_remote_actions_cannot_reconnect_while_connection_is_off(self, emit):
+        bridge = self.make_bridge()
+        bridge.config = {"email": "me@example.com", "connection_enabled": False}
+        with mock.patch.object(bridge, "connect") as connect:
+            bridge.handle({"command": "control", "action": "start"})
+        connect.assert_not_called()
+        action = emit.call_args.args[0]
+        self.assertFalse(action["ok"])
+        self.assertIn("switch it on", action["message"])
+
     def test_each_connection_attempt_performs_only_one_keyring_lookup(self):
         bridge = self.make_bridge()
         bridge.config = {"email": "me@example.com"}
