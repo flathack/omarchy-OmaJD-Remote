@@ -97,6 +97,164 @@ class InstallerTransactionTests(unittest.TestCase):
             self.assertEqual(len(legacy), 1)
             self.assertEqual((legacy[0] / "bin" / "python").read_text(encoding="utf-8"), "working")
 
+    def test_realpath_staging_resolves_to_private_directory_path(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            root_fd = secure_install.open_directory(root, create=True, private=True)
+            try:
+                staging_path = secure_install.open_realpath_staging(
+                    root_fd, ".omajdownload-staging", mode=0o700,
+                )
+                try:
+                    self.assertTrue(staging_path.startswith(str(root)))
+                    details = os.stat(staging_path)
+                    self.assertEqual(details.st_uid, os.getuid())
+                    self.assertEqual(details.st_mode & 0o777, 0o700)
+                    # The realpath helper must reject parent directories that
+                    # are symlinks the way the rest of the installer does.
+                    symlinked_root = root / "linked-parent"
+                    symlinked_root.mkdir()
+                    link = root / "link-only"
+                    link.symlink_to(symlinked_root, target_is_directory=True)
+                    with self.assertRaises(OSError):
+                        secure_install.open_directory(link, create=False)
+                finally:
+                    secure_install.remove_realpath_staging(staging_path)
+                    self.assertFalse(os.path.lexists(staging_path))
+            finally:
+                os.close(root_fd)
+
+    def test_python_venv_succeeds_through_realpath_staging(self):
+        """Regression test for issue #73.
+
+        ``python -m venv`` boots a ``python -m ensurepip`` grand-child that
+        does not inherit the parent process's directory descriptors, so an
+        installer that addresses the staging tree exclusively through
+        ``/proc/self/fd/<fd>/...`` cannot complete the bootstrap. We build
+        the staging tree under the real filesystem path of the installer's
+        private directory descriptor and rename it back into the descriptor
+        namespace once venv has finished.
+        """
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging_name = ".omajdownload-venv-test"
+            # Demonstrate the original failure path first: addressing the
+            # staging directory through the descriptor forces venv's
+            # ``ensurepip`` grand-child to lose the descriptor, so the
+            # bootstrap fails with ``No such file or directory``.
+            descriptor_root = root / "descriptor"
+            descriptor_root.mkdir()
+            descriptor_fd = secure_install.open_directory(
+                descriptor_root, create=True, private=True,
+            )
+            try:
+                descriptor_target = f"/proc/self/fd/{descriptor_fd}/{staging_name}_descriptor"
+                with mock.patch.object(secure_install, "open_realpath_staging",
+                                       side_effect=AssertionError(
+                                           "install() must use the descriptor path for the existing flow",
+                                       )):
+                    completed = subprocess.run(
+                        [sys.executable, "-m", "venv", descriptor_target],
+                        capture_output=True, text=True, pass_fds=(descriptor_fd,),
+                    )
+                self.assertNotEqual(
+                    completed.returncode, 0,
+                    msg=completed.stderr,
+                )
+                self.assertIn("No such file or directory", completed.stderr)
+            finally:
+                os.close(descriptor_fd)
+
+            # Now show that creating the venv on the realpath succeeds and
+            # the resulting tree can be moved back under the descriptor.
+            root_fd = secure_install.open_directory(root, create=True, private=True)
+            try:
+                staging_real = secure_install.open_realpath_staging(
+                    root_fd, staging_name, mode=0o700,
+                )
+                try:
+                    completed = subprocess.run(
+                        [sys.executable, "-m", "venv", staging_real],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(
+                        completed.returncode, 0,
+                        msg=completed.stderr,
+                    )
+                    os.rename(
+                        staging_real, staging_name,
+                        src_dir_fd=None, dst_dir_fd=root_fd,
+                    )
+                    staging_real = ""
+                    inside = os.stat(
+                        f"{staging_name}/bin/python", dir_fd=root_fd, follow_symlinks=False,
+                    )
+                    self.assertEqual(inside.st_uid, os.getuid())
+                finally:
+                    if staging_real:
+                        secure_install.remove_realpath_staging(staging_real)
+                try:
+                    secure_install.remove_tree(root_fd, staging_name)
+                except FileNotFoundError:
+                    pass
+            finally:
+                os.close(root_fd)
+
+    def test_setup_development_completes_via_realpath_staging(self):
+        """End-to-end check that ``setup_development`` no longer hits the
+        ``No such file or directory`` failure when venv addresses a staging
+        tree exclusively through ``/proc/self/fd/<fd>/...``.
+
+        We exercise only the descriptor-safe portion of the helper so the
+        test does not need network access: venv is created, then renamed
+        back under the descriptor, just like the production code path does
+        between the ``pip install`` and the ``check.sh`` runs.
+        """
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment_path = root / ".omajdownload-dev"
+            plugin_dir = root / "plugin"
+            plugin_dir.mkdir()
+            shutil.copy2(PROJECT / "requirements.lock", plugin_dir / "requirements.lock")
+
+            parent_fd = secure_install.open_directory(environment_path.parent, create=True)
+            try:
+                staging_real = secure_install.open_realpath_staging(
+                    parent_fd, environment_path.name, mode=0o700,
+                )
+                try:
+                    completed = subprocess.run(
+                        [sys.executable, "-m", "venv", staging_real],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(
+                        completed.returncode, 0,
+                        msg=completed.stderr,
+                    )
+                    os.rename(
+                        staging_real, environment_path.name,
+                        src_dir_fd=None, dst_dir_fd=parent_fd,
+                    )
+                    staging_real = ""
+                    environment_fd = os.open(
+                        environment_path.name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        os.fsync(environment_fd)
+                    finally:
+                        os.close(environment_fd)
+                finally:
+                    if staging_real:
+                        secure_install.remove_realpath_staging(staging_real)
+            finally:
+                try:
+                    secure_install.remove_tree(parent_fd, environment_path.name)
+                except FileNotFoundError:
+                    pass
+                os.close(parent_fd)
+
 
 class WorkflowPinTests(unittest.TestCase):
     def test_ci_and_release_build_inputs_are_pinned(self):

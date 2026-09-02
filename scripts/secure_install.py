@@ -87,6 +87,82 @@ def regular_file_bytes(directory_fd: int, name: str, limit: int) -> bytes:
         os.close(descriptor)
 
 
+def realpath_from_directory_fd(directory_fd: int) -> str:
+    """Return the underlying filesystem path that ``directory_fd`` refers to.
+
+    Python's :mod:`venv` bootstrap (specifically its ``ensurepip`` child
+    process) does not inherit the parent's directory descriptors, so venv
+    creation cannot proceed through ``/proc/self/fd/<fd>/...``. We expose the
+    real path so callers can build a staging tree that both the installer
+    and its grandchildren can address without descriptor inheritance.
+
+    The descriptor must have been opened with ``O_NOFOLLOW | O_DIRECTORY``;
+    in particular the resolved path is guaranteed not to end in a symlink the
+    caller just traversed.
+    """
+    try:
+        return os.readlink(f"/proc/self/fd/{directory_fd}")
+    except OSError:
+        # /proc/self/fd is unavailable (e.g. sandboxed runner); the caller
+        # already holds the private, owner-controlled directory descriptor, so
+        # refusing here is the only safe option.
+        raise InstallError("Cannot resolve staging directory: /proc/self/fd is unavailable")
+
+
+def open_realpath_staging(directory_fd: int, name: str, *, mode: int) -> str:
+    """Create ``name`` inside ``directory_fd`` via its real filesystem path.
+
+    Returns the absolute path, suitable for handing to subprocesses that do
+    not propagate file descriptors. The directory is private, owned by the
+    current user, and lives in the same filesystem as ``directory_fd`` so
+    the caller can rename it back under the descriptor later.
+    """
+    real_parent = realpath_from_directory_fd(directory_fd)
+    staging_path = os.path.join(real_parent, name)
+    try:
+        os.mkdir(staging_path, mode, dir_fd=None)
+    except FileExistsError:
+        raise InstallError(f"Staging directory already exists: {staging_path}")
+    details = os.stat(staging_path)
+    if details.st_uid != os.getuid():
+        os.rmdir(staging_path)
+        raise InstallError(f"Staging directory is not owned by uid {os.getuid()}: {staging_path}")
+    if details.st_mode & 0o077:
+        os.chmod(staging_path, mode)
+    return staging_path
+
+
+def remove_realpath_staging(staging_path: str | None) -> None:
+    """Best-effort cleanup of a realpath staging directory."""
+    if not staging_path:
+        return
+    try:
+        details = os.lstat(staging_path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(details.st_mode):
+        try:
+            os.unlink(staging_path)
+        except FileNotFoundError:
+            return
+        return
+    for root_directory, subdirectories, files in os.walk(staging_path, topdown=False):
+        for subdirectory in subdirectories:
+            try:
+                os.rmdir(os.path.join(root_directory, subdirectory))
+            except OSError:
+                pass
+        for filename in files:
+            try:
+                os.unlink(os.path.join(root_directory, filename))
+            except OSError:
+                pass
+    try:
+        os.rmdir(staging_path)
+    except OSError:
+        pass
+
+
 def remove_tree(parent_fd: int, name: str) -> None:
     details = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if not stat.S_ISDIR(details.st_mode):
@@ -244,6 +320,7 @@ def install(plugin_dir: Path, data_root: Path) -> str:
     plugin_fd = open_directory(plugin_dir, create=False)
     root_fd = -1
     staging_name = ""
+    staging_real = ""
     environment_name = ""
     next_name = ""
     published = False
@@ -256,21 +333,29 @@ def install(plugin_dir: Path, data_root: Path) -> str:
         staging_name = f".venv-{lock_hash}.new.{suffix}"
         environment_name = f".venv-{lock_hash}.installed.{suffix}"
         next_name = f".venv-link.{suffix}"
-        os.mkdir(staging_name, 0o700, dir_fd=root_fd)
+        # ``python -m venv`` boots a grand-child ``python -m ensurepip`` that
+        # does not inherit the parent's directory descriptor, so the staging
+        # tree cannot live under ``/proc/self/fd/<root_fd>/...``. Create it
+        # via the real filesystem path under the same private directory and
+        # rename it back under the descriptor once venv and pip are done.
+        staging_real = open_realpath_staging(root_fd, staging_name, mode=0o700)
         root_path = f"/proc/self/fd/{root_fd}"
-        staging_path = f"{root_path}/{staging_name}"
         plugin_path = f"/proc/self/fd/{plugin_fd}"
         runner = BoundedRunner(time.monotonic() + INSTALL_TIMEOUT, (root_fd, plugin_fd))
-        runner.run([sys.executable, "-m", "venv", staging_path])
+        runner.run([sys.executable, "-m", "venv", staging_real])
         runner.run([
-            f"{staging_path}/bin/pip", "install", "--disable-pip-version-check",
+            f"{staging_real}/bin/pip", "install", "--disable-pip-version-check",
             "--require-hashes", "-r", f"{plugin_path}/requirements.lock",
         ])
         runner.run([
-            f"{staging_path}/bin/python", f"{plugin_path}/scripts/verify_environment.py",
+            f"{staging_real}/bin/python", f"{plugin_path}/scripts/verify_environment.py",
             f"{plugin_path}/requirements.lock",
         ])
-        runner.run([f"{staging_path}/bin/python", "-c", "import myjdapi; from Crypto.Cipher import AES"])
+        runner.run([f"{staging_real}/bin/python", "-c", "import myjdapi; from Crypto.Cipher import AES"])
+        # Move the validated staging tree back under the directory descriptor
+        # for the descriptor-safe publication phase.
+        os.rename(staging_real, staging_name, src_dir_fd=None, dst_dir_fd=root_fd)
+        staging_real = ""
         write_marker(root_fd, staging_name, lock_hash)
         os.rename(staging_name, environment_name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
         staging_name = ""
@@ -303,6 +388,8 @@ def install(plugin_dir: Path, data_root: Path) -> str:
         prune(root_fd, environment_name)
         return f"OmaJD-Remote helper installed and verified in {data_root / environment_name}"
     finally:
+        if staging_real:
+            remove_realpath_staging(staging_real)
         if root_fd >= 0:
             for name in (staging_name,):
                 if not name:
@@ -344,6 +431,7 @@ def setup_development(plugin_dir: Path, environment_path: Path) -> str:
         raise InstallError("Development environment must have a specific directory name")
     plugin_fd = open_directory(plugin_dir, create=False)
     parent_fd = open_directory(environment_path.parent, create=True)
+    staging_real = ""
     try:
         try:
             details = os.stat(environment_path.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -352,6 +440,31 @@ def setup_development(plugin_dir: Path, environment_path: Path) -> str:
         else:
             if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid():
                 raise InstallError("Development environment is not a current-user directory")
+        # ``python -m venv`` does not propagate directory descriptors to its
+        # ``ensurepip`` grand-child, so build the venv via the real filesystem
+        # path and rename the finished tree back under the directory
+        # descriptor.
+        staging_real = open_realpath_staging(parent_fd, environment_path.name, mode=0o700)
+        try:
+            os.fchmod(
+                os.open(staging_real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+                0o700,
+            )
+        except OSError:
+            pass
+        root_path = f"/proc/self/fd/{parent_fd}/{environment_path.name}"
+        plugin_path = f"/proc/self/fd/{plugin_fd}"
+        runner = BoundedRunner(time.monotonic() + INSTALL_TIMEOUT, (parent_fd, plugin_fd))
+        runner.run([sys.executable, "-m", "venv", staging_real])
+        runner.run([
+            f"{staging_real}/bin/pip", "install", "--disable-pip-version-check",
+            "--require-hashes", "-r", f"{plugin_path}/requirements.lock",
+        ])
+        environment = dict(os.environ)
+        environment["PYTHON_BIN"] = f"{root_path}/bin/python"
+        runner.run([f"{plugin_path}/scripts/check.sh"], environment=environment)
+        os.rename(staging_real, environment_path.name, src_dir_fd=None, dst_dir_fd=parent_fd)
+        staging_real = ""
         environment_fd = os.open(
             environment_path.name,
             os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
@@ -359,21 +472,12 @@ def setup_development(plugin_dir: Path, environment_path: Path) -> str:
         )
         try:
             os.fchmod(environment_fd, 0o700)
-            root_path = f"/proc/self/fd/{parent_fd}/{environment_path.name}"
-            plugin_path = f"/proc/self/fd/{plugin_fd}"
-            runner = BoundedRunner(time.monotonic() + INSTALL_TIMEOUT, (parent_fd, plugin_fd))
-            runner.run([sys.executable, "-m", "venv", root_path])
-            runner.run([
-                f"{root_path}/bin/pip", "install", "--disable-pip-version-check",
-                "--require-hashes", "-r", f"{plugin_path}/requirements.lock",
-            ])
-            environment = dict(os.environ)
-            environment["PYTHON_BIN"] = f"{root_path}/bin/python"
-            runner.run([f"{plugin_path}/scripts/check.sh"], environment=environment)
             os.fsync(environment_fd)
         finally:
             os.close(environment_fd)
     finally:
+        if staging_real:
+            remove_realpath_staging(staging_real)
         os.close(parent_fd)
         os.close(plugin_fd)
     return f"Development environment is ready at {environment_path}"
