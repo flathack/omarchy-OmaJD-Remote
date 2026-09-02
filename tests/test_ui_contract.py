@@ -55,6 +55,20 @@ class UiContractTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIn("linkInputTooLongHint", self.widget)
+        # The hint must live in the section layout, not inside the
+        # clipped two-line ScrollView where a bottom-anchored Text would
+        # be invisible (issue #90).
+        self.assertNotIn("anchors.top: parent.bottom", self.widget)
+
+    def test_removal_confirmation_cannot_be_armed_while_busy(self):
+        # Regression test for issue #92: the remove ActionButton used to
+        # stay clickable for arming while the helper was busy, letting
+        # the 10s confirmation reset expire unseen. The arming click must
+        # now share the packageActionsEnabled guard.
+        self.assertNotIn(
+            "enabled: !packageRow.confirming || root.packageActionsEnabled",
+            self.widget,
+        )
 
     def test_linkgrabber_rename_is_keyboard_accessible(self):
         self.assertIn('Accessible.name: "Rename LinkGrabber package"', self.widget)

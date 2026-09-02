@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Bound the oversized-request drain and IPC line read in wall-clock time so
+  a trickling producer cannot stall the helper
+- Leave a re-opened XMLHttpRequest in OPENED after open() replaces an
+  in-flight request, and raise an InvalidStateError DOMException from
+  double send()
+- Bind persisted uncertain Add Links state to the account and device it
+  targeted, clearing it on forget and device switches
+- Restore absolute deadlines uniformly at the zero-remaining boundary and
+  guard the getitimer capability
+- Clear a stale Click'n'Load bind error after a successful start retry
+- Re-validate real-path installer staging through the directory descriptor
+  and drop the leaked descriptor in setup_development
+- Move the Add Links trim hint out of the clipped editor viewport, disable
+  removal arming while busy, and align the keyboard-guard comment
+
 ## [0.6.2] - 2026-09-02
 
 - Preserve outer absolute deadlines when nested deadlines are longer, and

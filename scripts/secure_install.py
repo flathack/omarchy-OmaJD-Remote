@@ -132,6 +132,28 @@ def open_realpath_staging(directory_fd: int, name: str, *, mode: int) -> str:
     return staging_path
 
 
+def validate_realpath_staging(directory_fd: int, name: str) -> bool:
+    """Re-verify a real-path staging entry through its directory descriptor.
+
+    Closes the time-of-check/time-of-use gap the path-based creation above
+    leaves open: the entry is re-opened with ``O_NOFOLLOW | O_DIRECTORY``
+    relative to ``directory_fd`` and its ownership and mode are checked on
+    the descriptor, so a same-uid symlink swap between ``readlink`` and
+    ``mkdir`` cannot redirect the staging tree.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        details = os.fstat(descriptor)
+        return details.st_uid == os.getuid() and not details.st_mode & 0o077
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def remove_realpath_staging(staging_path: str | None) -> None:
     """Best-effort cleanup of a realpath staging directory."""
     if not staging_path:
@@ -339,6 +361,8 @@ def install(plugin_dir: Path, data_root: Path) -> str:
         # via the real filesystem path under the same private directory and
         # rename it back under the descriptor once venv and pip are done.
         staging_real = open_realpath_staging(root_fd, staging_name, mode=0o700)
+        if not validate_realpath_staging(root_fd, staging_name):
+            raise InstallError("Staging directory is not a private current-user directory")
         root_path = f"/proc/self/fd/{root_fd}"
         plugin_path = f"/proc/self/fd/{plugin_fd}"
         runner = BoundedRunner(time.monotonic() + INSTALL_TIMEOUT, (root_fd, plugin_fd))
@@ -445,13 +469,12 @@ def setup_development(plugin_dir: Path, environment_path: Path) -> str:
         # path and rename the finished tree back under the directory
         # descriptor.
         staging_real = open_realpath_staging(parent_fd, environment_path.name, mode=0o700)
-        try:
-            os.fchmod(
-                os.open(staging_real, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
-                0o700,
-            )
-        except OSError:
-            pass
+        # Re-open the staging directory through the descriptor and verify
+        # ownership/mode with no-follow semantics before handing the real
+        # path to subprocesses, closing the window between the readlink
+        # resolution and the path-based mkdir above.
+        if not validate_realpath_staging(parent_fd, environment_path.name):
+            raise InstallError("Development environment staging is not a private current-user directory")
         root_path = f"/proc/self/fd/{parent_fd}/{environment_path.name}"
         plugin_path = f"/proc/self/fd/{plugin_fd}"
         runner = BoundedRunner(time.monotonic() + INSTALL_TIMEOUT, (parent_fd, plugin_fd))

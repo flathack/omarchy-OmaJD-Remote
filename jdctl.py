@@ -53,6 +53,7 @@ REMOTE_OPERATION_TIMEOUT = 25.0
 IPC_LINE_BYTE_LIMIT = 256 * 1024
 IPC_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
 IPC_REQUEST_DRAIN_LIMIT = 4 * 1024 * 1024
+IPC_REQUEST_READ_TIMEOUT = float(os.environ.get("OMAJDOWNLOAD_IPC_READ_TIMEOUT", "5.0"))
 IPC_STRING_LIMIT = 4096
 IPC_DISPLAY_STRING_LIMIT = 512
 IPC_ID_LIMIT = 256
@@ -147,6 +148,20 @@ _ACTIVE_DEADLINE: contextvars.ContextVar[tuple[float, str] | None] = contextvars
     "active_deadline", default=None
 )
 
+_MIN_TIMER_SECONDS = 1e-3
+
+
+def _floor_interval(seconds: float) -> float:
+    """Round a timer interval up to a deliverable minimum.
+
+    POSIX treats an ``it_value`` of zero as "disable the timer", so any
+    positive interval smaller than the floor must be raised instead of
+    silently cancelling the deadline it represents.
+    """
+    if 0 < seconds < _MIN_TIMER_SECONDS:
+        return _MIN_TIMER_SECONDS
+    return seconds
+
 
 @contextlib.contextmanager
 def absolute_deadline(seconds: float, operation: str) -> Any:
@@ -159,7 +174,11 @@ def absolute_deadline(seconds: float, operation: str) -> Any:
     running still fires (with zero remaining time, which causes an immediate
     delivery on the next signal-check).
     """
-    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "setitimer")
+        or not hasattr(signal, "getitimer")
+    ):
         yield
         return
 
@@ -177,10 +196,7 @@ def absolute_deadline(seconds: float, operation: str) -> Any:
     else:
         active_seconds = seconds
         active_operation = operation
-    # Round sub-millisecond values up to keep setitimer(0) from disabling the
-    # timer entirely (POSIX treats a zero interval as "no timer").
-    if 0 < active_seconds < 1e-3:
-        active_seconds = 1e-3
+    active_seconds = _floor_interval(active_seconds)
 
     def expired(_signum: int, _frame: Any) -> None:
         raise TimeoutError(f"{active_operation} exceeded its {active_seconds:g}-second deadline")
@@ -204,11 +220,14 @@ def absolute_deadline(seconds: float, operation: str) -> Any:
         # any pending SIGALRM delivery POSIX might have queued while we ran.
         signal.setitimer(signal.ITIMER_REAL, 0)
         if previous_remaining > 0:
-            signal.setitimer(signal.ITIMER_REAL, previous_remaining, previous_timer[1])
-        elif previous_remaining < 0:
-            # Outer deadline elapsed while we were running. Re-arm with a tiny
-            # interval so the next signal-check delivers the pending SIGALRM.
-            signal.setitimer(signal.ITIMER_REAL, 1e-3, previous_timer[1])
+            signal.setitimer(signal.ITIMER_REAL, _floor_interval(previous_remaining), previous_timer[1])
+        elif outer_remaining:
+            # There was an outer timer and its deadline elapsed while we
+            # were running (including the remaining == 0 boundary). Re-arm
+            # with the deliverable minimum so the next signal-check
+            # delivers the pending SIGALRM instead of silently dropping
+            # the deadline. Without a previous timer nothing is re-armed.
+            signal.setitimer(signal.ITIMER_REAL, _MIN_TIMER_SECONDS, previous_timer[1])
         signal.signal(signal.SIGALRM, previous_handler)
         _ACTIVE_DEADLINE.reset(token)
 
@@ -676,13 +695,20 @@ def read_uncertain_add_links() -> dict[str, Any] | None:
         token = required_text(data.get("token"), "token", IPC_ID_LIMIT)
         links = required_text(data.get("links"), "links", IPC_LINE_BYTE_LIMIT // 2)
         autostart = data.get("autostart")
+        email = required_text(data.get("email"), "email", 320, empty=True)
+        device_id = required_text(data.get("device_id"), "device_id", IPC_ID_LIMIT, empty=True)
     except ValueError as exc:
         raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, str(exc)) from exc
     if not token or not links:
         raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, "Uncertain Add Links state is missing required fields")
     if not isinstance(autostart, bool):
         raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, "Uncertain Add Links autostart must be a boolean")
-    return {"token": token, "links": links, "autostart": autostart}
+    record = {"token": token, "links": links, "autostart": autostart}
+    if email:
+        record["email"] = email
+    if device_id:
+        record["device_id"] = device_id
+    return record
 
 
 def write_uncertain_add_links(record: dict[str, Any]) -> None:
@@ -906,7 +932,6 @@ class ClickNLoadServer:
         if self.httpd is not None:
             return
         owner = self
-
         def report_error(message: str) -> None:
             payload = {"error": message}
             try:
@@ -1046,6 +1071,11 @@ class ClickNLoadServer:
             # affects the local variable; clear ``self.error`` so the
             # caller can see why start() came back without one.
             self.error = str(exc)
+        else:
+            # The listener is up: drop any stale bind-failure message from
+            # a previous failed attempt so the UI stops showing an error
+            # that no longer applies.
+            self.error = ""
 
     def stop(self) -> None:
         if self.httpd is None:
@@ -1238,6 +1268,34 @@ class Bridge:
             except OSError as backup_error:
                 self.state_warnings.append(f"{exc}; could not preserve it: {backup_error}")
             return None
+
+    def _uncertain_add_links_matches(self, record: dict[str, Any]) -> bool:
+        """Whether an uncertain Add Links record targets this session.
+
+        Records written before the account/device binding was introduced
+        carry neither ``email`` nor ``device_id``; they still match so the
+        duplicate-risk warning is preserved. Records that do carry the
+        fields must match the currently configured account and selected
+        device, otherwise a retry would replay an ambiguous submission
+        against a different destination.
+        """
+        if not record:
+            return False
+        recorded_email = text(record.get("email"))
+        recorded_device = text(record.get("device_id"))
+        if recorded_email and recorded_email != self.email:
+            return False
+        if recorded_device and recorded_device != self.active_device_id:
+            return False
+        return True
+
+    def _clear_uncertain_add_links(self) -> None:
+        """Drop the in-memory and persisted uncertain Add Links state."""
+        self.uncertain_add_links = None
+        try:
+            clear_uncertain_add_links()
+        except OSError as exc:
+            self.state_warnings.append(f"Uncertain Add Links state could not be cleared: {exc}")
 
     def load_inbox_state(self) -> list[dict[str, Any]]:
         try:
@@ -1891,6 +1949,7 @@ class Bridge:
                 self.snapshot()
                 return
             self.config = {}
+            self._clear_uncertain_add_links()
             cleanup_warning = ""
             try:
                 unlink_state_file(CONFIG_FILE)
@@ -1968,6 +2027,11 @@ class Bridge:
                 self.cached_downloads = []
                 self.cached_grabber = []
                 self.last_package_refresh = 0.0
+                if not self._uncertain_add_links_matches(self.uncertain_add_links or {}):
+                    # The pending ambiguous submission belonged to another
+                    # device; keeping it would replay the duplicate-risk
+                    # warning against the wrong destination.
+                    self._clear_uncertain_add_links()
                 self.action_result(True, "JDownloader instance selected" + persistence_warning, request)
             elif command == "control":
                 action = text(request.get("action"))
@@ -1994,13 +2058,13 @@ class Bridge:
                 retry_token = text(request.get("retry_token"))
                 if command == "retry_add_links":
                     uncertain = self.uncertain_add_links or {}
-                    valid_persisted_retry = bool(uncertain) \
+                    valid_persisted_retry = self._uncertain_add_links_matches(uncertain) \
                         and retry_token == text(uncertain.get("token")) \
                         and links == text(uncertain.get("links")) \
                         and autostart is (uncertain.get("autostart") is True)
                     if not valid_persisted_retry and request.get("duplicate_confirmed") is not True:
                         raise RuntimeError("The uncertain Add Links request changed; review it before submitting as new")
-                elif self.uncertain_add_links is not None \
+                elif self._uncertain_add_links_matches(self.uncertain_add_links or {}) \
                         and links == text(self.uncertain_add_links.get("links")) \
                         and autostart is (self.uncertain_add_links.get("autostart") is True):
                     self.action_result(
@@ -2028,6 +2092,12 @@ class Bridge:
                         "token": retry_token,
                         "links": links,
                         "autostart": autostart,
+                        # Bind the record to the account/device that the
+                        # ambiguous call targeted, so a restart (or a
+                        # device switch) can never replay the duplicate
+                        # risk against a different destination.
+                        "email": self.email,
+                        "device_id": self.active_device_id,
                     }
                     try:
                         write_uncertain_add_links(self.uncertain_add_links)
@@ -2077,23 +2147,60 @@ class Bridge:
         except Exception as exc:
             self.action_result(False, str(exc).strip() or "JDownloader action failed", request)
 
+    def _read_ipc_line(self) -> bytes:
+        """Read one newline-terminated IPC line, bounded in size and time.
+
+        A blocking ``readline`` would let a broken or malicious producer
+        that trickles bytes without a newline stall the daemon
+        indefinitely. Both the initial read and the drain use a
+        select-driven deadline instead, so the poll loop, the
+        Click'n'Load event drain, and further IPC stay responsive no
+        matter how the caller behaves.
+        """
+        buffer = sys.stdin.buffer
+        chunks: list[bytes] = []
+        total = 0
+        deadline = time.monotonic() + IPC_REQUEST_READ_TIMEOUT
+        while total <= IPC_LINE_BYTE_LIMIT:
+            available = deadline - time.monotonic()
+            if available <= 0:
+                break
+            readable, _, _ = select.select([buffer], [], [], min(0.25, available))
+            if not readable:
+                continue
+            chunk = buffer.read1(IPC_LINE_BYTE_LIMIT + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if chunk.endswith(b"\n"):
+                break
+        return b"".join(chunks)
+
     def _drain_oversized_request(self, encoded: bytes) -> None:
         """Consume the remainder of an oversized stdin line.
 
-        ``sys.stdin.buffer.readline(IPC_LINE_BYTE_LIMIT + 1)`` returns as
-        soon as a newline is seen, even if the line is longer than the
-        limit. When the framing is broken (no newline within
-        ``IPC_LINE_BYTE_LIMIT + 1`` bytes) the rest of the malformed line
-        sits in the buffer; we read it here up to a bounded cap so the
-        next request can be parsed without inherited garbage. Anything
-        past the cap is left for the upstream caller to deal with, since
-        the line itself is already invalid.
+        ``_read_ipc_line`` returns as soon as a newline is seen or its
+        byte/time budget is exhausted, so when the framing is broken the
+        rest of the malformed line sits in the buffer; we read it here up
+        to a bounded cap and a bounded wall-clock window so the next
+        request can be parsed without inherited garbage. Anything past
+        the cap is left for the upstream caller to deal with, since the
+        line itself is already invalid.
         """
         if encoded.endswith(b"\n") or not encoded:
             return
+        deadline = time.monotonic() + IPC_REQUEST_READ_TIMEOUT
         remaining = IPC_REQUEST_DRAIN_LIMIT - len(encoded)
+        buffer = sys.stdin.buffer
         while remaining > 0:
-            chunk = sys.stdin.buffer.readline(min(IPC_LINE_BYTE_LIMIT, remaining))
+            available = deadline - time.monotonic()
+            if available <= 0:
+                return
+            readable, _, _ = select.select([buffer], [], [], min(0.25, available))
+            if not readable:
+                continue
+            chunk = buffer.read1(min(IPC_LINE_BYTE_LIMIT, remaining))
             if not chunk:
                 return
             remaining -= len(chunk)
@@ -2110,7 +2217,7 @@ class Bridge:
                 timeout = min(0.25, max(0.0, POLL_SECONDS - (time.monotonic() - self.last_poll)))
                 readable, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
                 if readable:
-                    encoded = sys.stdin.buffer.readline(IPC_LINE_BYTE_LIMIT + 1)
+                    encoded = self._read_ipc_line()
                     if encoded == b"":
                         return
                     if len(encoded) > IPC_LINE_BYTE_LIMIT or not encoded.endswith(b"\n"):

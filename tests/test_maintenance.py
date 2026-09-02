@@ -124,6 +124,38 @@ class InstallerTransactionTests(unittest.TestCase):
             finally:
                 os.close(root_fd)
 
+    def test_realpath_staging_is_revalidated_through_the_descriptor(self):
+        # Regression test for issues #88/#89: the staging entry created
+        # via the real path must be re-opened no-follow through the
+        # directory descriptor before use, so a symlink swapped in after
+        # mkdir is refused instead of followed.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            root_fd = secure_install.open_directory(root, create=True, private=True)
+            try:
+                staging_path = secure_install.open_realpath_staging(
+                    root_fd, ".omajdownload-staging", mode=0o700,
+                )
+                try:
+                    self.assertTrue(
+                        secure_install.validate_realpath_staging(root_fd, ".omajdownload-staging"),
+                    )
+                    # Swap the entry for a symlink behind the installer's
+                    # back; the descriptor-based validation must reject it.
+                    secure_install.remove_realpath_staging(staging_path)
+                    target = root / "elsewhere"
+                    target.mkdir()
+                    os.symlink(target, staging_path, target_is_directory=True)
+                    self.assertFalse(
+                        secure_install.validate_realpath_staging(root_fd, ".omajdownload-staging"),
+                    )
+                finally:
+                    if os.path.lexists(staging_path):
+                        secure_install.remove_realpath_staging(staging_path)
+                    shutil.rmtree(target, ignore_errors=True)
+            finally:
+                os.close(root_fd)
+
     def test_python_venv_succeeds_through_realpath_staging(self):
         """Regression test for issue #73.
 
@@ -330,9 +362,13 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual(verify_release.verify(), "0.6.2")
 
     def test_release_tag_must_match_version(self):
-        self.assertEqual(verify_release.verify("v0.6.2"), "0.6.2")
+        self.assertEqual(verify_release.verify(), "0.6.2")
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             verify_release.verify("v9.9.9")
+        # While Unreleased entries exist, a tagged verification must be
+        # rejected until the next release is cut.
+        with self.assertRaisesRegex(RuntimeError, "Unreleased"):
+            verify_release.verify("v0.6.2")
 
     def test_tagged_release_rejects_unreleased_entries(self):
         self.assertFalse(verify_release.has_unreleased_entries(

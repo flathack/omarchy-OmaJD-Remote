@@ -337,10 +337,10 @@ test("XHR rejects send() while a request is still in flight", async () => {
   let threw = null;
   try { xhr.send("urls=second"); } catch (error) { threw = error; }
   assert.ok(threw, "second send() must throw while the previous request is still active");
-  assert.match(String(threw && threw.message || ""), /invalid state/i);
+  assert.equal(threw && threw.name, "InvalidStateError");
 });
 
-test("XHR second open() rejects a stale in-flight callback", async () => {
+test("XHR second open() aborts the in-flight request and returns to OPENED", async () => {
   const harness = pageHarness();
   // The page bridge probes the listener availability on load; wait for
   // that single captured row so this test only inspects the forwards
@@ -348,13 +348,23 @@ test("XHR second open() rejects a stale in-flight callback", async () => {
   await new Promise(resolve => queueMicrotask(resolve));
   await new Promise(resolve => setTimeout(resolve, 0));
   const xhr = new harness.window.XMLHttpRequest();
+  const events = [];
+  for (const name of ["loadstart", "load", "abort", "loadend"]) {
+    xhr.addEventListener(name, () => events.push({ name, readyState: xhr.readyState }));
+  }
   xhr.open("POST", "http://127.0.0.1:9666/flash/add");
   xhr.send("urls=first");
-  // Exactly one additional captured row must be the XHR's own forward.
   const baseline = harness.captured.length;
   // Replace the request before the first response resolves. The second
-  // open() must ask the bridge to cancel the in-flight forward.
+  // open() must ask the bridge to cancel the in-flight forward and
+  // leave the XHR in OPENED, not DONE.
   xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  assert.equal(xhr.readyState, 1, "open() must leave the XHR in OPENED after replacing a request");
+  assert.deepEqual(events, [
+    { name: "loadstart", readyState: 1 },
+    { name: "abort", readyState: 4 },
+    { name: "loadend", readyState: 4 },
+  ]);
   xhr.send("urls=second");
   await new Promise(resolve => queueMicrotask(resolve));
   await new Promise(resolve => setTimeout(resolve, 0));

@@ -191,19 +191,23 @@
       // open() can detect that it no longer owns this XHR.
       this.__omajOpenGeneration += 1;
       this.__omajGeneration = this.__omajOpenGeneration;
-      this.__omajReadyState = OMAJ_STATE_OPENED;
       this.__omajStatus = 0;
       this.__omajResponseText = "";
       this.__omajAborted = false;
       this.__omajFinished = false;
       this.__omajController = null;
-      this.dispatchEvent(new Event("readystatechange"));
       if (hadInflight) {
+        // The replaced request terminates at DONE per the XHR spec:
+        // readystatechange, abort, loadend. Afterwards open() must
+        // leave the XHR in OPENED so the next send() starts from
+        // state 1 instead of 4.
         this.__omajReadyState = OMAJ_STATE_DONE;
         this.dispatchEvent(new Event("readystatechange"));
         this.dispatchEvent(new ProgressEvent("abort"));
         this.dispatchEvent(new ProgressEvent("loadend"));
       }
+      this.__omajReadyState = OMAJ_STATE_OPENED;
+      this.dispatchEvent(new Event("readystatechange"));
     }
     setRequestHeader(name, value) {
       if (!this.__omajRoute) return super.setRequestHeader(name, value);
@@ -214,7 +218,10 @@
       // duplicate in-flight forwards duplicating Click'n'Load inbox
       // entries. Replicate that here.
       if (this.__omajController && !this.__omajFinished) {
-        throw new Error("Failed to execute 'send' on XMLHttpRequest: The object is in an invalid state.");
+        throw new DOMException(
+          "Failed to execute 'send' on 'XMLHttpRequest': The object is in an invalid state.",
+          "InvalidStateError",
+        );
       }
       this.__omajController = new AbortController();
       this.__omajAborted = false;

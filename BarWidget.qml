@@ -286,11 +286,10 @@ Panel {
             }
             onTextKey: function (t) {
                 if (!root.backend) {
-                    // Helper is still starting up or has been torn down;
-                    // a press would otherwise raise a QML TypeError. The
-                    // 'a' branch can still jump focus to the link editor
-                    // even when no backend is available, so leave that one
-                    // unguarded.
+                    // Helper is still starting up or has been torn down:
+                    // every shortcut is inert until the backend resolves.
+                    // Even 'a' needs remoteControlsEnabled, so there is no
+                    // focus-only shortcut without a backend.
                     return;
                 }
                 if (t === "r" || t === "R")
@@ -703,24 +702,6 @@ Panel {
                                             linkInputTooLongHint.visible = true
                                             linkInputTooLongTimer.restart()
                                         }
-                                        Timer {
-                                            id: linkInputTooLongTimer
-                                            interval: 4000
-                                            onTriggered: linkInputTooLongHint.visible = false
-                                        }
-                                        Text {
-                                            id: linkInputTooLongHint
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.top: parent.bottom
-                                            text: qsTr("Trimmed to ") + root.addLinksMaxChars + qsTr(" characters; the helper rejects longer inputs.")
-                                            textFormat: Text.PlainText
-                                            color: root.dim
-                                            font.family: root.fontFamily
-                                            font.pixelSize: Style.font.caption
-                                            wrapMode: Text.WordWrap
-                                            visible: false
-                                        }
                                         onActiveFocusChanged: if (activeFocus) {
                                             root.focusedControl = linkInput;
                                             root.keyboardHint = Accessible.name + " · Ctrl+Enter sends to LinkGrabber";
@@ -740,6 +721,27 @@ Panel {
                                         }
                                     }
                                 }
+                            }
+
+                            // The trim feedback lives in the section layout
+                            // instead of inside the clipped ScrollView, so a
+                            // truncated paste is actually visible.
+                            Text {
+                                id: linkInputTooLongHint
+                                width: parent.width
+                                text: qsTr("Trimmed to ") + root.addLinksMaxChars + qsTr(" characters; the helper rejects longer inputs.")
+                                textFormat: Text.PlainText
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                                visible: false
+                            }
+
+                            Timer {
+                                id: linkInputTooLongTimer
+                                interval: 4000
+                                onTriggered: linkInputTooLongHint.visible = false
                             }
 
                             Row {
@@ -1116,7 +1118,7 @@ Panel {
                         iconText: packageRow.confirming ? "󰄬" : "󰆴"
                         tooltipText: packageRow.confirming ? "Confirm removal" : (packageRow.grabber ? "Remove from LinkGrabber" : "Remove entry; keep files")
                         foreground: packageRow.confirming ? root.urgent : root.dim
-                        enabled: !packageRow.confirming || root.packageActionsEnabled
+                        enabled: root.packageActionsEnabled
                         onClicked: {
                             var key = (packageRow.grabber ? "g:" : "d:") + packageRow.uuid;
                             if (!packageRow.confirming) {

@@ -247,6 +247,29 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "entries"):
             jdctl.validate_request(request_data)
 
+    def test_floor_interval_keeps_positive_intervals_deliverable(self):
+        # Issue #86: the restore path must apply the same sub-millisecond
+        # floor as the entry path so a tiny or exactly-zero remaining
+        # interval cannot silently disable the timer.
+        self.assertEqual(jdctl._floor_interval(0.0), 0.0)
+        self.assertEqual(jdctl._floor_interval(0.0001), jdctl._MIN_TIMER_SECONDS)
+        self.assertEqual(jdctl._floor_interval(0.5), 0.5)
+        self.assertEqual(jdctl._floor_interval(1e-3), 1e-3)
+
+    def test_absolute_deadline_degrades_without_getitimer(self):
+        # Issue #87: the capability guard must cover getitimer too, so an
+        # interpreter exposing setitimer but not getitimer takes the no-op
+        # path instead of raising AttributeError.
+        original = signal.getitimer
+        delattr(signal, "getitimer")
+        try:
+            started = time.monotonic()
+            with jdctl.absolute_deadline(0.02, "test request"):
+                time.sleep(0.01)
+            self.assertLess(time.monotonic() - started, 0.2)
+        finally:
+            signal.getitimer = original
+
     def test_remote_package_strings_are_display_bounded(self):
         package = jdctl.normalize_package({"uuid": "valid-id", "name": "n" * 5000, "status": "s" * 5000}, "download")
         self.assertLessEqual(len(package["name"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
@@ -407,6 +430,33 @@ class ClickNLoadTests(unittest.TestCase):
             server.start()
         self.assertEqual(server.error, "simulated bind failure")
         self.assertIsNone(server.httpd)
+        self.assertFalse(server.listening)
+
+    def test_error_is_cleared_after_a_successful_retry(self):
+        """Regression test for issue #91.
+
+        A bind failure followed by a successful retry must clear the
+        stale ``error`` string so the UI stops reporting a problem that
+        no longer exists.
+        """
+        server = jdctl.ClickNLoadServer(lambda _payload: None, queue.Queue(), port=0)
+        real = jdctl.BoundedThreadingHTTPServer
+        attempts = {"count": 0}
+
+        def constructor(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError("port busy")
+            return real(*args, **kwargs)
+
+        with mock.patch("jdctl.BoundedThreadingHTTPServer", side_effect=constructor):
+            server.start()
+            self.assertEqual(server.error, "port busy")
+            self.assertIsNone(server.httpd)
+            server.start()
+        self.assertEqual(server.error, "")
+        self.assertTrue(server.listening)
+        server.stop()
         self.assertFalse(server.listening)
 
     def test_http_reports_persistence_failure(self):
@@ -641,22 +691,6 @@ class BridgeTests(unittest.TestCase):
             "jdctl.read_inbox", return_value=[],
         ), mock.patch(
             "jdctl.read_uncertain_add_links", return_value=None,
-        ):
-            return jdctl.Bridge(start_cnl=False)
-
-    def make_bridge_with_state(self, environment):
-        """Construct a Bridge pointed at a throwaway config directory.
-
-        Used by tests that need to exercise the on-disk state files for
-        the uncertain Add Links recovery path. ``environment`` is a
-        mapping suitable for ``mock.patch.dict(os.environ, ...)``.
-        """
-        with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
-            "jdctl.install_http_bounds"
-        ), mock.patch(
-            "jdctl.ClickNLoadServer.start"
-        ), mock.patch(
-            "jdctl.ClickNLoadServer.stop"
         ):
             return jdctl.Bridge(start_cnl=False)
 
@@ -931,6 +965,111 @@ class BridgeTests(unittest.TestCase):
                         "retry_token": uncertain["retry_token"],
                         "duplicate_confirmed": True,
                     })
+                self.assertIsNone(bridge.uncertain_add_links)
+                self.assertFalse(expected_path.exists())
+            finally:
+                bridge.cnl_server.stop()
+
+    @mock.patch("jdctl.emit")
+    def test_uncertain_add_links_is_bound_to_account_and_device(self, emit):
+        """Regression test for issue #84.
+
+        The persisted record must carry the account and device the
+        ambiguous call targeted, and a retry (or the duplicate-risk
+        warning) must refuse to fire when either no longer matches the
+        current session.
+        """
+        with TemporaryDirectory() as directory:
+            expected_path, patches = self._patches_for_persisted_state(directory)
+            for patch in patches:
+                patch.start()
+                self.addCleanup(patch.stop)
+            bridge = jdctl.Bridge(start_cnl=False)
+            try:
+                bridge.config = {"email": "me@example.com"}
+                bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+                bridge.device = bridge.jd.device_objects["device-1"]
+                bridge.active_device_id = "device-1"
+                bridge.device.linkgrabber.add_links.side_effect = TimeoutError("response lost")
+                with mock.patch.object(bridge, "snapshot"):
+                    bridge.handle({
+                        "command": "add_links",
+                        "request_id": "links-1",
+                        "links": "https://example.test/file",
+                        "autostart": False,
+                    })
+                uncertain = emit.call_args.args[0]
+                self.assertTrue(uncertain["uncertain"])
+                self.assertEqual(bridge.uncertain_add_links["email"], "me@example.com")
+                self.assertEqual(bridge.uncertain_add_links["device_id"], "device-1")
+
+                # A device switch invalidates the record: the plain
+                # add_links duplicate-risk warning must not fire ...
+                bridge.active_device_id = "device-2"
+                bridge.device.linkgrabber.add_links.side_effect = None
+                bridge.uncertain_add_links = None  # cleared by select_device in practice
+                with mock.patch.object(bridge, "snapshot"):
+                    bridge.handle({
+                        "command": "add_links",
+                        "request_id": "links-2",
+                        "links": "https://example.test/file",
+                        "autostart": False,
+                    })
+                self.assertTrue(emit.call_args.args[0]["ok"])
+
+                # ... and a retry without an explicit duplicate
+                # confirmation must be rejected while the device does
+                # not match (the handler reports it as a failed action
+                # instead of raising).
+                bridge.uncertain_add_links = {
+                    "token": uncertain["retry_token"],
+                    "links": "https://example.test/file",
+                    "autostart": False,
+                    "email": "me@example.com",
+                    "device_id": "device-1",
+                }
+                calls_before = bridge.device.linkgrabber.add_links.call_count
+                with mock.patch.object(bridge, "snapshot"):
+                    bridge.handle({
+                        "command": "retry_add_links",
+                        "request_id": "links-3",
+                        "links": "https://example.test/file",
+                        "autostart": False,
+                        "retry_token": uncertain["retry_token"],
+                        "duplicate_confirmed": False,
+                    })
+                rejected = emit.call_args.args[0]
+                self.assertFalse(rejected["ok"])
+                self.assertIn("changed", rejected["message"])
+                self.assertEqual(bridge.device.linkgrabber.add_links.call_count, calls_before)
+            finally:
+                bridge.cnl_server.stop()
+
+    @mock.patch("jdctl.emit")
+    def test_forget_clears_uncertain_add_links_state(self, emit):
+        """Forgetting the account must drop the persisted duplicate-risk
+        record instead of leaving it to resurface on the next start."""
+        with TemporaryDirectory() as directory:
+            expected_path, patches = self._patches_for_persisted_state(directory)
+            for patch in patches:
+                patch.start()
+                self.addCleanup(patch.stop)
+            bridge = jdctl.Bridge(start_cnl=False)
+            try:
+                bridge.config = {"email": "me@example.com"}
+                bridge.uncertain_add_links = {
+                    "token": "token-1",
+                    "links": "https://example.test/file",
+                    "autostart": False,
+                    "email": "me@example.com",
+                    "device_id": "device-1",
+                }
+                jdctl.write_uncertain_add_links(bridge.uncertain_add_links)
+                self.assertTrue(expected_path.exists())
+                with mock.patch("jdctl.write_config"), mock.patch(
+                    "jdctl.secret_clear",
+                ), mock.patch("jdctl.unlink_state_file"), mock.patch.object(bridge, "snapshot"):
+                    bridge.handle({"command": "forget"})
                 self.assertIsNone(bridge.uncertain_add_links)
                 self.assertFalse(expected_path.exists())
             finally:
@@ -1500,6 +1639,63 @@ class ProcessProtocolTests(unittest.TestCase):
                 # The bridge's SIGTERM handler re-raises SystemExit so the
                 # exit code is 128 + 15 unless the kill propagated raw.
                 self.assertIn(process.returncode, (-signal.SIGTERM, 128 + signal.SIGTERM))
+
+    def test_trickled_line_without_newline_does_not_stall_the_daemon(self):
+        """Regression test for issue #82.
+
+        A producer that starts a line and then trickles bytes without
+        ever sending a newline used to block the daemon in a blocking
+        ``readline``. The select-driven read now times out, rejects the
+        partial line, and keeps serving subsequent valid requests.
+        """
+        with TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["XDG_CONFIG_HOME"] = directory
+            environment["OMAJDOWNLOAD_CNL_PORT"] = "0"
+            environment["OMAJDOWNLOAD_IPC_READ_TIMEOUT"] = "0.2"
+            process = subprocess.Popen(
+                [sys.executable, str(MODULE_PATH), "daemon"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            output_buffer = b""
+
+            def read_message():
+                nonlocal output_buffer
+                while b"\n" not in output_buffer:
+                    readable, _, _ = select.select([process.stdout], [], [], 4)
+                    self.assertTrue(readable, "helper output timeout")
+                    output_buffer += os.read(process.stdout.fileno(), 65536)
+                line, output_buffer = output_buffer.split(b"\n", 1)
+                return json.loads(line)
+
+            try:
+                self.assertEqual(read_message()["type"], "snapshot")
+                self.assertEqual(read_message()["type"], "cnl")
+
+                # Start a line and never terminate it. The pipe stays open,
+                # so a blocking read would wedge the helper forever.
+                process.stdin.write(b'{"command":"refresh"')
+                process.stdin.flush()
+
+                rejection = read_message()
+                self.assertEqual(rejection["type"], "action")
+                self.assertFalse(rejection["ok"])
+                self.assertIn("line exceeds", rejection["message"])
+
+                # The daemon must still answer follow-up traffic even
+                # though the malformed line's pipe is still open.
+                process.stdin.write(b'{"command":"refresh"}\n')
+                process.stdin.flush()
+                self.assertEqual(read_message()["type"], "snapshot")
+            finally:
+                process.terminate()
+                process.wait(timeout=4)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
 
 
 if __name__ == "__main__":
