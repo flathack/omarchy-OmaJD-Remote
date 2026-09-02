@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
   `python -m venv`'s `ensurepip` grand-child can resolve it
 - Reject oversized QML requests without terminating the helper and clamp
   the Add Links editor so a paste cannot overrun the IPC line limit
+- Persist uncertain manual Add Links submissions so the duplicate-risk
+  warning and retry token survive a helper restart
 
 ## [0.6.1] - 2026-09-02
 

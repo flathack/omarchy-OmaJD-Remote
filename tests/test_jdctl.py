@@ -571,8 +571,40 @@ class FakeApi:
 
 class BridgeTests(unittest.TestCase):
     def make_bridge(self):
-        with mock.patch("jdctl.read_config", return_value={}), mock.patch("jdctl.read_inbox", return_value=[]):
+        with mock.patch("jdctl.read_config", return_value={}), mock.patch(
+            "jdctl.read_inbox", return_value=[],
+        ), mock.patch(
+            "jdctl.read_uncertain_add_links", return_value=None,
+        ):
             return jdctl.Bridge(start_cnl=False)
+
+    def make_bridge_with_state(self, environment):
+        """Construct a Bridge pointed at a throwaway config directory.
+
+        Used by tests that need to exercise the on-disk state files for
+        the uncertain Add Links recovery path. ``environment`` is a
+        mapping suitable for ``mock.patch.dict(os.environ, ...)``.
+        """
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch(
+            "jdctl.install_http_bounds"
+        ), mock.patch(
+            "jdctl.ClickNLoadServer.start"
+        ), mock.patch(
+            "jdctl.ClickNLoadServer.stop"
+        ):
+            return jdctl.Bridge(start_cnl=False)
+
+    def _patches_for_persisted_state(self, directory):
+        """Return a list of mock patches for tests that touch on-disk state."""
+        expected_path = Path(directory) / "omarchy" / "omajdownload" / "uncertain-add-links.json"
+        environment = {"XDG_CONFIG_HOME": directory, "OMAJDOWNLOAD_CNL_PORT": "0"}
+        return expected_path, [
+            mock.patch.dict(os.environ, environment, clear=False),
+            mock.patch("jdctl.UNCERTAIN_ADD_LINKS_FILE", expected_path),
+            mock.patch("jdctl.install_http_bounds"),
+            mock.patch("jdctl.ClickNLoadServer.start"),
+            mock.patch("jdctl.ClickNLoadServer.stop"),
+        ]
 
     def test_device_refresh_preserves_offline_preference(self):
         bridge = self.make_bridge()
@@ -739,6 +771,104 @@ class BridgeTests(unittest.TestCase):
             })
         self.assertEqual(bridge.device.linkgrabber.add_links.call_count, 2)
         self.assertTrue(emit.call_args.args[0]["ok"])
+
+    @mock.patch("jdctl.emit")
+    def test_uncertain_add_links_persists_and_survives_a_helper_restart(self, emit):
+        """Regression test for issue #75.
+
+        When a manual Add Links request fails ambiguously after possibly
+        reaching JDownloader, the helper used to keep the duplicate-risk
+        warning only in memory. A helper restart dropped both the warning
+        and the retry token, so the user could silently re-submit a
+        request that JDownloader may already have accepted.
+        """
+        with TemporaryDirectory() as directory:
+            expected_path, patches = self._patches_for_persisted_state(directory)
+            for patch in patches:
+                patch.start()
+                self.addCleanup(patch.stop)
+            first_bridge = jdctl.Bridge(start_cnl=False)
+            first_bridge.config = {"email": "me@example.com"}
+            first_bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+            first_bridge.device = first_bridge.jd.device_objects["device-1"]
+            first_bridge.device.linkgrabber.add_links.side_effect = TimeoutError("response lost")
+            with mock.patch.object(first_bridge, "snapshot"):
+                first_bridge.handle({
+                    "command": "add_links",
+                    "request_id": "links-1",
+                    "links": "https://example.test/file",
+                    "autostart": False,
+                })
+            record = emit.call_args.args[0]
+            self.assertTrue(record["uncertain"])
+            retry_token = record["retry_token"]
+            self.assertTrue(expected_path.exists())
+            self.assertEqual(first_bridge.uncertain_add_links["token"], retry_token)
+            first_bridge.cnl_server.stop()
+
+            # Stop the patches, then create a fresh Bridge pointed at the
+            # same path. The state file must be re-loaded without any of
+            # the previous session's mock patches leaking in.
+            for patch in patches:
+                patch.stop()
+
+            with mock.patch("jdctl.emit") as restart_emit:
+                for patch in patches:
+                    patch.start()
+                try:
+                    second_bridge = jdctl.Bridge(start_cnl=False)
+                    self.assertIsNotNone(second_bridge.uncertain_add_links)
+                    self.assertEqual(second_bridge.uncertain_add_links["token"], retry_token)
+                    self.assertEqual(
+                        second_bridge.uncertain_add_links["links"],
+                        "https://example.test/file",
+                    )
+                    second_bridge.snapshot()
+                    snapshot = restart_emit.call_args.args[0]
+                    self.assertTrue(snapshot["add_links_uncertain"])
+                    self.assertEqual(snapshot["add_links_retry_token"], retry_token)
+                finally:
+                    second_bridge.cnl_server.stop()
+                    for patch in patches:
+                        patch.stop()
+
+    @mock.patch("jdctl.emit")
+    def test_uncertain_add_links_state_is_cleared_after_successful_resubmit(self, emit):
+        """A successful retry must remove the persisted duplicate-risk state."""
+        with TemporaryDirectory() as directory:
+            expected_path, patches = self._patches_for_persisted_state(directory)
+            for patch in patches:
+                patch.start()
+                self.addCleanup(patch.stop)
+            bridge = jdctl.Bridge(start_cnl=False)
+            try:
+                bridge.config = {"email": "me@example.com"}
+                bridge.jd = FakeApi([{"id": "device-1", "name": "Server", "type": "jd"}])
+                bridge.device = bridge.jd.device_objects["device-1"]
+                bridge.device.linkgrabber.add_links.side_effect = [
+                    TimeoutError("response lost"),
+                    None,
+                ]
+                with mock.patch.object(bridge, "snapshot"):
+                    bridge.handle({
+                        "command": "add_links",
+                        "request_id": "links-1",
+                        "links": "https://example.test/file",
+                        "autostart": False,
+                    })
+                    uncertain = emit.call_args.args[0]
+                    bridge.handle({
+                        "command": "retry_add_links",
+                        "request_id": "links-2",
+                        "links": "https://example.test/file",
+                        "autostart": False,
+                        "retry_token": uncertain["retry_token"],
+                        "duplicate_confirmed": True,
+                    })
+                self.assertIsNone(bridge.uncertain_add_links)
+                self.assertFalse(expected_path.exists())
+            finally:
+                bridge.cnl_server.stop()
 
     @mock.patch("jdctl.emit")
     def test_device_selection_commit_failure_preserves_live_device(self, emit):

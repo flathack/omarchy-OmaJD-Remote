@@ -35,6 +35,12 @@ APP_KEY = "https://github.com/flathack/omarchy-OmaJD-Remote"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy" / "omajdownload"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 INBOX_FILE = CONFIG_DIR / "clicknload-inbox.json"
+UNCERTAIN_ADD_LINKS_FILE = Path(
+    os.environ.get(
+        "OMAJDOWNLOAD_UNCERTAIN_ADD_LINKS_FILE",
+        str(CONFIG_DIR / "uncertain-add-links.json"),
+    )
+)
 POLL_SECONDS = 5.0
 DEVICE_REFRESH_SECONDS = 15.0
 PACKAGE_REFRESH_SECONDS = 30.0
@@ -633,6 +639,58 @@ def write_inbox(data: list[dict[str, Any]]) -> None:
     atomic_write_json(INBOX_FILE, data, ensure_ascii=False)
 
 
+def read_uncertain_add_links() -> dict[str, Any] | None:
+    """Recover an Add Links request whose remote outcome was uncertain.
+
+    The helper persists the request's links, autostart flag, and a retry
+    token the moment a remote call fails in an ambiguous way so the
+    next helper start can surface the same duplicate-risk warning and
+    acceptance token that the previous session established.
+    """
+    try:
+        data = read_private_json(UNCERTAIN_ADD_LINKS_FILE, CNL_INBOX_BYTE_LIMIT)
+    except FileNotFoundError:
+        return None
+    except (OSError, StateFileError, json.JSONDecodeError) as exc:
+        raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, f"Could not read uncertain Add Links state: {exc}") from exc
+    if not isinstance(data, dict):
+        raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, "Uncertain Add Links state must contain a JSON object")
+    try:
+        token = required_text(data.get("token"), "token", IPC_ID_LIMIT)
+        links = required_text(data.get("links"), "links", IPC_LINE_BYTE_LIMIT // 2)
+        autostart = data.get("autostart")
+    except ValueError as exc:
+        raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, str(exc)) from exc
+    if not token or not links:
+        raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, "Uncertain Add Links state is missing required fields")
+    if not isinstance(autostart, bool):
+        raise StateFileError(UNCERTAIN_ADD_LINKS_FILE, "Uncertain Add Links autostart must be a boolean")
+    return {"token": token, "links": links, "autostart": autostart}
+
+
+def write_uncertain_add_links(record: dict[str, Any]) -> None:
+    """Persist an uncertain Add Links record so it survives restarts."""
+    encoded = json.dumps(record, ensure_ascii=True, indent=2)
+    if len(encoded.encode("utf-8")) + 16 > CNL_INBOX_BYTE_LIMIT:
+        raise OSError(f"Uncertain Add Links state exceeds {human_bytes(CNL_INBOX_BYTE_LIMIT)}")
+    atomic_write_json(UNCERTAIN_ADD_LINKS_FILE, record)
+
+
+def clear_uncertain_add_links() -> None:
+    """Remove the persisted uncertain Add Links record, if any."""
+    try:
+        directory_fd = open_private_directory(UNCERTAIN_ADD_LINKS_FILE.parent, create=True)
+    except (FileNotFoundError, OSError):
+        return
+    try:
+        try:
+            os.unlink(UNCERTAIN_ADD_LINKS_FILE.name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return
+    finally:
+        os.close(directory_fd)
+
+
 def quarantine_state_file(path: Path) -> Path:
     suffix = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     backup = path.with_name(f"{path.name}.corrupt-{suffix}")
@@ -1110,6 +1168,7 @@ class Bridge:
         self.inbox_write_blocked = False
         self.config = self.load_config_state()
         self.inbox = self.load_inbox_state()
+        self.uncertain_add_links = self.load_uncertain_add_links_state()
         self.jd: Any = None
         self.device: Any = None
         self.active_device_id = ""
@@ -1124,7 +1183,6 @@ class Bridge:
         self.grabber_error = ""
         self.downloads_truncated = False
         self.grabber_truncated = False
-        self.uncertain_add_links: dict[str, Any] | None = None
         self.inbox_lock = threading.Lock()
         self.cnl_events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=CNL_EVENT_LIMIT)
         self.cnl_state_changed = threading.Event()
@@ -1143,6 +1201,17 @@ class Bridge:
                 self.config_write_blocked = True
                 self.state_warnings.append(f"{exc}; could not preserve it: {backup_error}")
             return {}
+
+    def load_uncertain_add_links_state(self) -> dict[str, Any] | None:
+        try:
+            return read_uncertain_add_links()
+        except StateFileError as exc:
+            try:
+                backup = quarantine_state_file(exc.path)
+                self.state_warnings.append(f"{exc}; preserved as {backup.name}")
+            except OSError as backup_error:
+                self.state_warnings.append(f"{exc}; could not preserve it: {backup_error}")
+            return None
 
     def load_inbox_state(self) -> list[dict[str, Any]]:
         try:
@@ -1934,6 +2003,13 @@ class Bridge:
                         "links": links,
                         "autostart": autostart,
                     }
+                    try:
+                        write_uncertain_add_links(self.uncertain_add_links)
+                    except OSError as write_exc:
+                        self.state_warnings.append(
+                            f"Uncertain Add Links state could not be persisted: {write_exc}; "
+                            "duplicate-risk warning will be lost across restarts"
+                        )
                     self.action_result(
                         False,
                         "Add Links outcome is uncertain: " + (str(exc).strip() or exc.__class__.__name__),
@@ -1943,6 +2019,7 @@ class Bridge:
                     )
                     return
                 self.uncertain_add_links = None
+                clear_uncertain_add_links()
                 self.action_result(True, "Links added" + (" and queued" if autostart else " to LinkGrabber"), request)
             elif command in ("cnl_accept", "cnl_retry"):
                 self.submit_cnl(request, retry=command == "cnl_retry")
