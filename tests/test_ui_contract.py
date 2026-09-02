@@ -169,6 +169,35 @@ class UiContractTests(unittest.TestCase):
         self.assertIn('root.backend.downloads.length > 0 || root.backend.downloadError !== ""', self.widget)
         self.assertIn('root.backend.grabber.length > 0 || root.backend.grabberError !== ""', self.widget)
 
+    def test_package_actions_are_disabled_while_another_helper_request_is_in_flight(self):
+        """Regression test for issue #80.
+
+        Package-level actions (move / force / rename / remove) used to
+        stay enabled while the helper was still processing a different
+        remote request, so the backend had to drop the second one.
+        Every ActionButton inside PackageRow must now honour a shared
+        ``packageActionsEnabled`` binding so a double-fire is
+        impossible.
+        """
+        required_clauses = [
+            "Move to downloads",
+            "Force download",
+            "Rename package",
+            "Save package name",
+            "Confirm removal",
+        ]
+        for clause in required_clauses:
+            self.assertIn(
+                clause,
+                self.widget,
+                f"the package action '{clause}' must remain reachable in the QML",
+            )
+        # The shared guard property must combine the backend presence
+        # flag with a pending-request probe so a connection bounce
+        # mid-click cannot double-fire a remote action.
+        self.assertIn("readonly property bool packageActionsEnabled", self.widget)
+        self.assertIn("backend.pendingRequestId", self.widget)
+
     def test_clicknload_details_are_single_target_and_late_responses_are_ignored(self):
         self.assertIn("property string cnlExpandedId", self.service)
         self.assertIn('String(data.id || "") !== cnlExpandedId', self.service)

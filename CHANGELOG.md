@@ -21,6 +21,9 @@ All notable changes to this project will be documented in this file.
 - Guard the ``r`` (refresh) keyboard shortcut against a still-starting
   service backend so a QML TypeError cannot be raised while the
   helper is unavailable
+- Disable the package action buttons (move / force / rename / remove)
+  while another remote request is still in flight so the second
+  action never races the first
 
 ## [0.6.1] - 2026-09-02
 

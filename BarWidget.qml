@@ -37,6 +37,13 @@ Panel {
     // keeping it here lets the editor surface immediate feedback when a
     // paste would have overrun the IPC line limit.
     readonly property int addLinksMaxChars: 32768
+    // All package-level actions (move / force / rename / remove) are
+    // disabled while the helper is processing another remote command.
+    // The local Click'n'Load review buttons stay enabled on purpose so
+    // users can keep triaging requests while a remote call is in
+    // flight; the helper already serialises each cnl_accept against
+    // any other remote action.
+    readonly property bool packageActionsEnabled: backend && remoteControlsEnabled && backend.pendingRequestId === ""
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -1068,6 +1075,7 @@ Panel {
                         iconText: packageRow.grabber ? "󰐊" : "󰐕"
                         tooltipText: packageRow.grabber ? "Move to downloads" : "Force download"
                         foreground: root.foreground
+                        enabled: root.packageActionsEnabled && !packageRow.confirming
                         onClicked: {
                             root.removeTarget = "";
                             if (packageRow.grabber)
@@ -1082,6 +1090,7 @@ Panel {
                         iconText: "󰏫"
                         tooltipText: "Rename package"
                         foreground: root.dim
+                        enabled: root.packageActionsEnabled
                         onClicked: packageRow.beginRename()
                     }
                     ActionButton {
@@ -1090,7 +1099,7 @@ Panel {
                         tooltipText: "Save package name"
                         foreground: root.foreground
                         bordered: true
-                        enabled: !packageRow.renamePending && String(root.renameDraft || "").trim() !== ""
+                        enabled: !packageRow.renamePending && String(root.renameDraft || "").trim() !== "" && root.packageActionsEnabled
                         onClicked: packageRow.finishRename(true)
                     }
                     ActionButton {
@@ -1107,6 +1116,7 @@ Panel {
                         iconText: packageRow.confirming ? "󰄬" : "󰆴"
                         tooltipText: packageRow.confirming ? "Confirm removal" : (packageRow.grabber ? "Remove from LinkGrabber" : "Remove entry; keep files")
                         foreground: packageRow.confirming ? root.urgent : root.dim
+                        enabled: !packageRow.confirming || root.packageActionsEnabled
                         onClicked: {
                             var key = (packageRow.grabber ? "g:" : "d:") + packageRow.uuid;
                             if (!packageRow.confirming) {
