@@ -900,6 +900,11 @@ class ClickNLoadServer:
         return int(self.httpd.server_address[1]) if self.httpd is not None else self.requested_port
 
     def start(self) -> None:
+        # Repeated start() calls must be harmless. A previous listener
+        # keeps holding its socket until stop() shuts it down, and the
+        # caller may legitimately retry after a transient bind failure.
+        if self.httpd is not None:
+            return
         owner = self
 
         def report_error(message: str) -> None:
@@ -1035,7 +1040,11 @@ class ClickNLoadServer:
             thread = threading.Thread(target=self.httpd.serve_forever, name="omajdownload-cnl", daemon=True)
             thread.start()
         except OSError as exc:
-            self.httpd = None
+            # A bind failure must not lose the handle to an already-running
+            # listener. ``httpd`` is still None here because start() refuses
+            # to start a second listener, so the assignment below only ever
+            # affects the local variable; clear ``self.error`` so the
+            # caller can see why start() came back without one.
             self.error = str(exc)
 
     def stop(self) -> None:

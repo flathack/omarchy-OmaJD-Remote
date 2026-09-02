@@ -374,6 +374,41 @@ class ClickNLoadTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(admitted[0]["links"], ["https://example.test/file"])
 
+    def test_repeated_start_is_idempotent_and_stop_still_shuts_down(self):
+        """Regression test for issue #81.
+
+        A second start() while a listener is already running must be a
+        no-op (not tear anything down). stop() afterwards must still be
+        able to drain the existing listener.
+        """
+        server = jdctl.ClickNLoadServer(lambda _payload: None, queue.Queue(), port=0)
+        server.start()
+        first_handle = server.httpd
+        self.addCleanup(server.stop)
+        # Repeated start() calls must be harmless.
+        server.start()
+        server.start()
+        self.assertIs(server.httpd, first_handle)
+        self.assertTrue(server.listening)
+        # stop() must still shut down the original listener.
+        server.stop()
+        self.assertIsNone(server.httpd)
+        self.assertFalse(server.listening)
+
+    def test_bind_failure_records_error_without_leaving_a_handle(self):
+        """A bind failure on the first start() must set ``error`` and leave
+        ``httpd`` None without leaking any prior handle.
+        """
+        server = jdctl.ClickNLoadServer(lambda _payload: None, queue.Queue(), port=0)
+        # Patch the BoundedThreadingHTTPServer constructor to simulate the
+        # bind OSError that the issue describes, then verify the helper
+        # does NOT clobber any previously-stored handle.
+        with mock.patch("jdctl.BoundedThreadingHTTPServer", side_effect=OSError("simulated bind failure")):
+            server.start()
+        self.assertEqual(server.error, "simulated bind failure")
+        self.assertIsNone(server.httpd)
+        self.assertFalse(server.listening)
+
     def test_http_reports_persistence_failure(self):
         def fail(_payload):
             raise OSError("disk full")

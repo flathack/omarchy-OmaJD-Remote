@@ -24,6 +24,10 @@ All notable changes to this project will be documented in this file.
 - Disable the package action buttons (move / force / rename / remove)
   while another remote request is still in flight so the second
   action never races the first
+- Make the Click'n'Load listener start() idempotent and stop()
+  recoverable: a second start() is a no-op while a listener is
+  already running, and a bind failure on a cold start records the
+  error without leaving a stale handle
 
 ## [0.6.1] - 2026-09-02
 
