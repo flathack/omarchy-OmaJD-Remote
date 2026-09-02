@@ -40,11 +40,21 @@ jobs:
   browser-e2e:
     runs-on: ubuntu-24.04
     container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
+    env:
+      # Pinned browser/WebDriver versions for the 2026/09/01 snapshot so the
+      # released extension attestations are reproducible from the reviewed
+      # source.
+      CHROMIUM_VERSION: 151.0.7922.173-1
+      FIREFOX_VERSION: 154.0-1
+      GECKODRIVER_VERSION: 0.37.1-1
     steps:
       - run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - run: >-
           pacman -Syu --noconfirm
-          chromium firefox geckodriver python python-pip
+          chromium=${CHROMIUM_VERSION}
+          firefox=${FIREFOX_VERSION}
+          geckodriver=${GECKODRIVER_VERSION}
+          python python-pip
           xorg-server-xvfb openssl zip unzip
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |

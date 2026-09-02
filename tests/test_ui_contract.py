@@ -133,6 +133,20 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("id: installerWatchdog", self.service)
         self.assertIn("installer.signal(15)", self.service)
 
+    def test_splitparser_lines_are_clipped_to_bound(self):
+        # Regression test for the marketplace reviewer's request that the
+        # QML-side SplitParser must not hand arbitrarily long lines to the
+        # UI event loop.
+        self.assertIn("readonly property int processLineLimit", self.service)
+        self.assertIn("function clipProcessLine(line)", self.service)
+        # All four SplitParser consumers must route through the clip helper.
+        clipped = self.service.count("root.clipProcessLine(")
+        self.assertGreaterEqual(
+            clipped, 4,
+            "Expected every SplitParser onRead to clip its line before use; "
+            f"found {clipped} clipProcessLine calls.",
+        )
+
     def test_every_text_node_forces_plain_text(self):
         text_blocks = re.findall(r"(?<![A-Za-z])Text\s*\{([^{}]*)", self.widget)
         self.assertTrue(text_blocks)

@@ -21,6 +21,20 @@ Item {
     property string controllerState: "OFFLINE"
     property int speed: 0
     property string speedText: "0 B/s"
+    // Maximum number of bytes the QML-side SplitParser will deliver per
+    // line. The Python daemon already bounded reads via IPC_LINE_BYTE_LIMIT,
+    // but the parser itself does not cap and will hand arbitrarily long
+    // strings to onRead if a helper or installer writes unconstrained
+    // diagnostics. Clamping here keeps the UI snappy and prevents a single
+    // pathological line from monopolising the event loop.
+    readonly property int processLineLimit: 4096
+
+    function clipProcessLine(line) {
+        var text = String(line == null ? "" : line);
+        if (text.length <= root.processLineLimit)
+            return text;
+        return text.substring(0, root.processLineLimit) + "\u2026";
+    }
     property var downloads: []
     property var grabber: []
     property string downloadError: ""
@@ -415,12 +429,12 @@ Item {
         stdinEnabled: true
         stdout: SplitParser {
             onRead: function (line) {
-                root.handleLine(line);
+                root.handleLine(root.clipProcessLine(line));
             }
         }
         stderr: SplitParser {
             onRead: function (line) {
-                var message = String(line || "").trim();
+                var message = root.clipProcessLine(line).trim();
                 if (message !== "")
                     root.lastError = message;
             }
@@ -460,14 +474,14 @@ Item {
         id: installer
         stdout: SplitParser {
             onRead: function (line) {
-                var message = String(line || "").trim();
+                var message = root.clipProcessLine(line).trim();
                 if (message !== "")
                     root.actionStatus = message;
             }
         }
         stderr: SplitParser {
             onRead: function (line) {
-                var message = String(line || "").trim();
+                var message = root.clipProcessLine(line).trim();
                 if (message !== "")
                     root.actionStatus = message;
             }
