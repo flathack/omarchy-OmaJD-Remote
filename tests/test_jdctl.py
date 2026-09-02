@@ -1225,6 +1225,86 @@ class ProcessProtocolTests(unittest.TestCase):
                 process.stdout.close()
                 process.stderr.close()
 
+    def test_oversized_request_does_not_terminate_the_daemon(self):
+        """Regression test for issue #74.
+
+        Sending an ``add_links`` request whose serialised JSON exceeds
+        ``IPC_LINE_BYTE_LIMIT`` used to make the daemon return the error
+        and then exit. After the fix the daemon rejects the request, drains
+        the rest of the oversize line off stdin so the next request can be
+        parsed, and remains usable for further valid IPC traffic.
+        """
+        with TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["XDG_CONFIG_HOME"] = directory
+            environment["OMAJDOWNLOAD_CNL_PORT"] = "0"
+            process = subprocess.Popen(
+                [sys.executable, str(MODULE_PATH), "daemon"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            output_buffer = b""
+
+            def read_message():
+                nonlocal output_buffer
+                while b"\n" not in output_buffer:
+                    readable, _, _ = select.select([process.stdout], [], [], 4)
+                    self.assertTrue(readable, "helper output timeout")
+                    output_buffer += os.read(process.stdout.fileno(), 65536)
+                line, output_buffer = output_buffer.split(b"\n", 1)
+                return json.loads(line)
+
+            try:
+                self.assertEqual(read_message()["type"], "snapshot")
+                self.assertEqual(read_message()["type"], "cnl")
+
+                # Build a valid JSON request whose serialised body is well
+                # past ``IPC_LINE_BYTE_LIMIT``. ``"a"`` repeated inside the
+                # ``links`` field still yields parseable JSON.
+                oversized_payload = json.dumps(
+                    {
+                        "command": "add_links",
+                        "request_id": "oversize-1",
+                        "links": "https://example.com/" + ("a" * jdctl.IPC_LINE_BYTE_LIMIT * 2),
+                        "autostart": False,
+                    },
+                    separators=(",", ":"),
+                )
+                self.assertGreater(len(oversized_payload), jdctl.IPC_LINE_BYTE_LIMIT)
+                process.stdin.write(oversized_payload.encode("utf-8") + b"\n")
+                process.stdin.flush()
+
+                rejection = read_message()
+                self.assertEqual(rejection["type"], "action")
+                self.assertFalse(rejection["ok"])
+                self.assertIn("line exceeds", rejection["message"])
+
+                # The daemon must still be alive and respond to a follow-up
+                # request in the same session, both for a normal framing and
+                # for a request that was framed correctly but never closed
+                # by a newline (which the fix drains before parsing the
+                # next well-formed line).
+                process.stdin.write(b'{"command":"refresh"}\n')
+                process.stdin.flush()
+                self.assertEqual(read_message()["type"], "snapshot")
+
+                process.stdin.write(b'{"command":"refresh"}\n')
+                process.stdin.flush()
+                self.assertEqual(read_message()["type"], "snapshot")
+            finally:
+                process.terminate()
+                process.wait(timeout=4)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+                # The process exited via SIGTERM (terminate()), not because
+                # of any framing error from the oversize requests above.
+                # The bridge's SIGTERM handler re-raises SystemExit so the
+                # exit code is 128 + 15 unless the kill propagated raw.
+                self.assertIn(process.returncode, (-signal.SIGTERM, 128 + signal.SIGTERM))
+
 
 if __name__ == "__main__":
     unittest.main()

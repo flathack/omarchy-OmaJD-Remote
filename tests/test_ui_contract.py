@@ -25,6 +25,37 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("Math.ceil(Style.font.body * 1.4) * 2 + Style.space(16)", self.widget)
         self.assertIn("Controls.ScrollBar.vertical.policy: Controls.ScrollBar.AsNeeded", self.widget)
 
+    def test_add_links_editor_bounds_paste_before_ipc_serialisation(self):
+        # The editor must clamp a paste before it reaches the helper so the
+        # IPC request cannot exceed the daemon's per-line byte limit. The
+        # clamp is exposed as a property so it stays in sync with the
+        # helper-side bound on ``links``.
+        self.assertIn("readonly property int addLinksMaxChars", self.widget)
+        maximum = int(
+            re.search(
+                r"readonly property int addLinksMaxChars:\s*(\d+)",
+                self.widget,
+            ).group(1)
+        )
+        self.assertGreater(maximum, 0)
+        # The editor limit must be well below the IPC line limit so a paste
+        # cannot overrun even after JSON serialisation and other wrapping.
+        ipc_line_byte_limit = int(
+            re.search(
+                r"\bIPC_LINE_BYTE_LIMIT\s*=\s*(\d+)\s*\*\s*1024",
+                (PROJECT / "jdctl.py").read_text(encoding="utf-8"),
+            ).group(1)
+        ) * 1024
+        self.assertLessEqual(maximum, ipc_line_byte_limit // 2)
+        # The editor must reference the clamp and trim the text when it
+        # overflows. The visual hint acknowledges the truncation to the user.
+        self.assertRegex(
+            self.widget,
+            r"onTextChanged:\s*\{[^}]*substring\(0,\s*maximum\)",
+            re.DOTALL,
+        )
+        self.assertIn("linkInputTooLongHint", self.widget)
+
     def test_linkgrabber_rename_is_keyboard_accessible(self):
         self.assertIn('Accessible.name: "Rename LinkGrabber package"', self.widget)
         self.assertIn("onAccepted: packageRow.finishRename(true)", self.widget)

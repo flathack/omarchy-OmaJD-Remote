@@ -46,6 +46,7 @@ REMOTE_CALL_TIMEOUT = 20.0
 REMOTE_OPERATION_TIMEOUT = 25.0
 IPC_LINE_BYTE_LIMIT = 256 * 1024
 IPC_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
+IPC_REQUEST_DRAIN_LIMIT = 4 * 1024 * 1024
 IPC_STRING_LIMIT = 4096
 IPC_DISPLAY_STRING_LIMIT = 512
 IPC_ID_LIMIT = 256
@@ -1973,6 +1974,29 @@ class Bridge:
         except Exception as exc:
             self.action_result(False, str(exc).strip() or "JDownloader action failed", request)
 
+    def _drain_oversized_request(self, encoded: bytes) -> None:
+        """Consume the remainder of an oversized stdin line.
+
+        ``sys.stdin.buffer.readline(IPC_LINE_BYTE_LIMIT + 1)`` returns as
+        soon as a newline is seen, even if the line is longer than the
+        limit. When the framing is broken (no newline within
+        ``IPC_LINE_BYTE_LIMIT + 1`` bytes) the rest of the malformed line
+        sits in the buffer; we read it here up to a bounded cap so the
+        next request can be parsed without inherited garbage. Anything
+        past the cap is left for the upstream caller to deal with, since
+        the line itself is already invalid.
+        """
+        if encoded.endswith(b"\n") or not encoded:
+            return
+        remaining = IPC_REQUEST_DRAIN_LIMIT - len(encoded)
+        while remaining > 0:
+            chunk = sys.stdin.buffer.readline(min(IPC_LINE_BYTE_LIMIT, remaining))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+            if chunk.endswith(b"\n"):
+                return
+
     def run(self) -> None:
         try:
             self.snapshot(refresh=True)
@@ -1987,8 +2011,14 @@ class Bridge:
                     if encoded == b"":
                         return
                     if len(encoded) > IPC_LINE_BYTE_LIMIT or not encoded.endswith(b"\n"):
+                        # Reject this single request, then drain the rest
+                        # of the malformed line so the next newline in
+                        # stdin re-aligns the daemon with the caller's
+                        # framing. Closing the loop would otherwise
+                        # restart the helper into a crash-retry pause.
+                        self._drain_oversized_request(encoded)
                         self.action_result(False, f"Invalid helper request: line exceeds {human_bytes(IPC_LINE_BYTE_LIMIT)}")
-                        return
+                        continue
                     try:
                         request = json.loads(encoded.decode("utf-8"))
                         encoded = b""

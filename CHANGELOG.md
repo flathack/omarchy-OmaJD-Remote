@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 - Preserve outer absolute deadlines when nested deadlines are longer, and
   restore any outer's already-elapsed deadline on exit
+- Build the staging virtualenv on the real filesystem path so
+  `python -m venv`'s `ensurepip` grand-child can resolve it
+- Reject oversized QML requests without terminating the helper and clamp
+  the Add Links editor so a paste cannot overrun the IPC line limit
 
 ## [0.6.1] - 2026-09-02
 

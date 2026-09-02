@@ -32,6 +32,11 @@ Panel {
     readonly property int clickNLoadLinkCount: countLinks(backend ? backend.cnlInbox : [], "link_count")
     readonly property int grabberLinkCount: countLinks(backend ? backend.grabber : [], "child_count")
     readonly property string barStatusText: statusText()
+    // Matches the helper-side bound on the ``links`` field of an add_links
+    // request. The same value is enforced again on the server side, but
+    // keeping it here lets the editor surface immediate feedback when a
+    // paste would have overrun the IPC line limit.
+    readonly property int addLinksMaxChars: 32768
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -667,6 +672,40 @@ Panel {
                                         enabled: root.remoteControlsEnabled
                                         Accessible.name: "Download links"
                                         background: null
+                                        // Bound the editor so a paste cannot
+                                        // overflow the helper's IPC request
+                                        // limit. The same limit is enforced
+                                        // again on the server side, but this
+                                        // gives the user immediate feedback
+                                        // instead of letting them discover
+                                        // the cap from a daemon rejection.
+                                        onTextChanged: {
+                                            var maximum = root.addLinksMaxChars
+                                            if (linkInput.text.length <= maximum)
+                                                return
+                                            linkInput.text = linkInput.text.substring(0, maximum)
+                                            linkInput.cursorPosition = maximum
+                                            linkInputTooLongHint.visible = true
+                                            linkInputTooLongTimer.restart()
+                                        }
+                                        Timer {
+                                            id: linkInputTooLongTimer
+                                            interval: 4000
+                                            onTriggered: linkInputTooLongHint.visible = false
+                                        }
+                                        Text {
+                                            id: linkInputTooLongHint
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.bottom
+                                            text: qsTr("Trimmed to ") + root.addLinksMaxChars + qsTr(" characters; the helper rejects longer inputs.")
+                                            textFormat: Text.PlainText
+                                            color: root.dim
+                                            font.family: root.fontFamily
+                                            font.pixelSize: Style.font.caption
+                                            wrapMode: Text.WordWrap
+                                            visible: false
+                                        }
                                         onActiveFocusChanged: if (activeFocus) {
                                             root.focusedControl = linkInput;
                                             root.keyboardHint = Accessible.name + " · Ctrl+Enter sends to LinkGrabber";
