@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import contextvars
 import json
 import os
 import queue
@@ -42,6 +43,7 @@ PACKAGE_MODEL_LIMIT = 1000
 DEVICE_MODEL_LIMIT = 128
 REMOTE_RESPONSE_BYTE_LIMIT = 8 * 1024 * 1024
 REMOTE_CALL_TIMEOUT = 20.0
+REMOTE_OPERATION_TIMEOUT = 25.0
 IPC_LINE_BYTE_LIMIT = 256 * 1024
 IPC_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
 IPC_STRING_LIMIT = 4096
@@ -68,6 +70,9 @@ CNL_KEY_PATTERN = re.compile(r"return\s+['\"]([0-9a-fA-F]{32})['\"]\s*;?", re.IG
 CNL_PENDING = "pending"
 CNL_SUBMITTING = "submitting"
 CNL_UNCERTAIN = "uncertain"
+_REMOTE_OPERATION_DEADLINE: contextvars.ContextVar[tuple[float, str] | None] = contextvars.ContextVar(
+    "remote_operation_deadline", default=None
+)
 
 
 class RemoteResponseTooLarge(RuntimeError):
@@ -142,17 +147,43 @@ def absolute_deadline(seconds: float, operation: str) -> Any:
         raise TimeoutError(f"{operation} exceeded its {seconds:g}-second deadline")
 
     previous_handler = signal.getsignal(signal.SIGALRM)
+    started = time.monotonic()
     signal.signal(signal.SIGALRM, expired)
     previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        elapsed = time.monotonic() - started
+        previous_remaining = max(0.0, previous_timer[0] - elapsed) if previous_timer[0] else 0.0
+        signal.setitimer(signal.ITIMER_REAL, previous_remaining, previous_timer[1])
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+@contextlib.contextmanager
+def remote_operation_deadline(seconds: float, operation: str) -> Any:
+    """Set one absolute deadline shared by nested remote calls."""
+    deadline = time.monotonic() + seconds
+    previous = _REMOTE_OPERATION_DEADLINE.get()
+    if previous is not None:
+        deadline = min(deadline, previous[0])
+        operation = previous[1]
+    token = _REMOTE_OPERATION_DEADLINE.set((deadline, operation))
+    try:
+        yield
+    finally:
+        _REMOTE_OPERATION_DEADLINE.reset(token)
+
+
 def remote_call(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    with absolute_deadline(REMOTE_CALL_TIMEOUT, "MyJDownloader request"):
+    operation = "MyJDownloader request"
+    seconds = REMOTE_CALL_TIMEOUT
+    deadline = _REMOTE_OPERATION_DEADLINE.get()
+    if deadline is not None:
+        seconds = min(seconds, deadline[0] - time.monotonic())
+        if seconds <= 0:
+            raise TimeoutError(f"{deadline[1]} exceeded its deadline")
+        operation = deadline[1]
+    with absolute_deadline(seconds, operation):
         return call(*args, **kwargs)
 
 
@@ -380,6 +411,18 @@ def required_text(value: Any, field: str, limit: int = IPC_STRING_LIMIT, *, empt
     if not empty and not value.strip():
         raise ValueError(f"{field} must not be empty")
     return value
+
+
+def remote_identifier(value: Any, field: str) -> str:
+    """Canonicalize a remote identifier without changing its identity."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise RuntimeError(f"MyJDownloader returned an invalid {field}")
+    result = str(value)
+    if len(result) > IPC_ID_LIMIT:
+        raise RuntimeError(f"MyJDownloader returned an oversized {field}")
+    return result
 
 
 def id_list(value: Any, field: str = "package_ids") -> list[str]:
@@ -655,7 +698,7 @@ def origin_label(origin: str) -> str:
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             return ""
         port = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme}://{parsed.hostname}{port}"
+        return bounded_text(f"{parsed.scheme}://{parsed.hostname}{port}", IPC_DISPLAY_STRING_LIMIT)
     except (ValueError, TypeError):
         return ""
 
@@ -928,6 +971,13 @@ def secret_clear(email: str) -> None:
 
 
 def query_all_packages(query: Any, fields: dict[str, Any]) -> PackageQueryResult:
+    if _REMOTE_OPERATION_DEADLINE.get() is not None:
+        return _query_all_packages(query, fields)
+    with remote_operation_deadline(REMOTE_OPERATION_TIMEOUT, "MyJDownloader package query"):
+        return _query_all_packages(query, fields)
+
+
+def _query_all_packages(query: Any, fields: dict[str, Any]) -> PackageQueryResult:
     rows: list[dict[str, Any]] = []
     seen_pages: set[tuple[str, ...]] = set()
     page = 0
@@ -968,7 +1018,7 @@ def package_uuid(row: dict[str, Any]) -> str:
         if isinstance(value, list):
             value = value[0] if value else ""
         if value not in (None, ""):
-            return bounded_text(value, IPC_ID_LIMIT)
+            return remote_identifier(value, "package identifier")
     return ""
 
 
@@ -1130,7 +1180,7 @@ class Bridge:
             raise RuntimeError("MyJDownloader returned an invalid device entry")
         self.devices = [
             {
-                "id": bounded_text(item.get("id"), IPC_ID_LIMIT),
+                "id": remote_identifier(item.get("id"), "device identifier"),
                 "name": bounded_text(item.get("name"), IPC_DISPLAY_STRING_LIMIT, "JDownloader"),
                 "type": bounded_text(item.get("type"), 64),
             }
@@ -1258,6 +1308,10 @@ class Bridge:
             self.emit_cnl_state()
 
     def snapshot(self, refresh: bool = False) -> None:
+        with remote_operation_deadline(REMOTE_OPERATION_TIMEOUT, "MyJDownloader snapshot"):
+            self._snapshot(refresh)
+
+    def _snapshot(self, refresh: bool = False) -> None:
         configured = bool(self.email)
         if not configured:
             emit({

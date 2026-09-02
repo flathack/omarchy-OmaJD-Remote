@@ -169,13 +169,31 @@ class BoundaryTests(unittest.TestCase):
             jdctl.validate_request(request_data)
 
     def test_remote_package_strings_are_display_bounded(self):
-        package = jdctl.normalize_package({"uuid": "x" * 1000, "name": "n" * 5000, "status": "s" * 5000}, "download")
-        self.assertLessEqual(len(package["uuid"]), jdctl.IPC_ID_LIMIT)
+        package = jdctl.normalize_package({"uuid": "valid-id", "name": "n" * 5000, "status": "s" * 5000}, "download")
         self.assertLessEqual(len(package["name"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
         self.assertLessEqual(len(package["status"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
 
+    def test_remote_package_identifiers_are_rejected_when_oversized(self):
+        with self.assertRaisesRegex(RuntimeError, "identifier"):
+            jdctl.normalize_package({"uuid": "x" * (jdctl.IPC_ID_LIMIT + 1)}, "download")
+
 
 class PaginationTests(unittest.TestCase):
+    def test_paginated_calls_share_one_operation_deadline(self):
+        calls = []
+
+        def slow_query(_arguments):
+            calls.append(time.monotonic())
+            time.sleep(0.03)
+            return [{"uuid": len(calls)}] * jdctl.PACKAGE_PAGE_SIZE
+
+        started = time.monotonic()
+        with mock.patch("jdctl.REMOTE_CALL_TIMEOUT", 0.05), self.assertRaises(TimeoutError):
+            with jdctl.remote_operation_deadline(0.05, "package snapshot"):
+                jdctl.query_all_packages(slow_query, {})
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertEqual(len(calls), 2)
+
     def test_reads_every_package_page(self):
         packages = [{"uuid": index} for index in range(137)]
         calls = []
@@ -344,6 +362,18 @@ class ClickNLoadTests(unittest.TestCase):
         ), timeout=3).close()
         self.assertEqual(admitted[-1]["origin"], "https://extension-source.example")
         self.assertTrue(admitted[-1]["origin_verified"])
+
+    def test_http_bounds_origin_before_admission(self):
+        admitted = []
+        server = jdctl.ClickNLoadServer(admitted.append, queue.Queue(), port=0)
+        server.start()
+        self.addCleanup(server.stop)
+        body = parse.urlencode({"urls": "https://files.example/file"}).encode()
+        long_origin = "https://" + ("a" * (jdctl.IPC_DISPLAY_STRING_LIMIT + 100)) + ".example"
+        request.urlopen(request.Request(
+            f"http://127.0.0.1:{server.port}/flash/add", data=body, headers={"Origin": long_origin}
+        ), timeout=3).close()
+        self.assertLessEqual(len(admitted[-1]["origin"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
 
     def test_http_size_limit_and_capacity_response(self):
         server = jdctl.ClickNLoadServer(
@@ -515,6 +545,12 @@ class BridgeTests(unittest.TestCase):
             for index in range(jdctl.DEVICE_MODEL_LIMIT + 1)
         ])
         with self.assertRaisesRegex(RuntimeError, "devices"):
+            bridge.refresh_devices(update=False)
+
+    def test_device_identifier_is_rejected_when_oversized(self):
+        bridge = self.make_bridge()
+        bridge.jd = FakeApi([{"id": "d" * (jdctl.IPC_ID_LIMIT + 1), "name": "Server", "type": "jd"}])
+        with self.assertRaisesRegex(RuntimeError, "oversized device identifier"):
             bridge.refresh_devices(update=False)
 
     @mock.patch("jdctl.emit")

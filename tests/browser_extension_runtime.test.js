@@ -115,6 +115,79 @@ function pageHarness({ failRequests = false } = {}) {
   return { window, captured, timerDelays, documentListeners, MockForm, MockScript };
 }
 
+function contentScriptHarness() {
+  const listeners = new Map();
+  const sent = [];
+  const responses = [];
+  const window = {
+    addEventListener(type, callback) {
+      const rows = listeners.get(type) || [];
+      rows.push(callback);
+      listeners.set(type, rows);
+    },
+    postMessage(data) { responses.push(data); }
+  };
+  const document = {
+    getElementById() { return null; },
+    createElement() { return { setAttribute() {}, style: {}, remove() {}, textContent: "" }; },
+    body: { appendChild() {} },
+    documentElement: { appendChild() {} }
+  };
+  let lastError = null;
+  const chrome = {
+    runtime: {
+      get lastError() { return lastError; },
+      sendMessage(message, callback) { sent.push({ message, callback }); }
+    }
+  };
+  const context = vm.createContext({
+    window, document, chrome, URL, TextEncoder, String, Error,
+    setTimeout, clearTimeout, Map, Set, Array, Object, TypeError
+  });
+  vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/content-script.js"), "utf8"), context);
+  return {
+    sent,
+    responses,
+    dispatch(data) {
+      for (const callback of listeners.get("message") || []) callback({ source: window, data });
+    },
+    complete(index, result = { ok: true, status: 200, body: "success\r\n" }) {
+      sent[index].callback(result);
+    }
+  };
+}
+
+test("content script validates direct page messages and bounds pending forwards", () => {
+  const harness = contentScriptHarness();
+  harness.dispatch({
+    marker: "omajdownload-cnl-request-v1", type: "request", id: "oversize",
+    url: "http://127.0.0.1:9666/flash/add", method: "POST", probe: false,
+    body: "x".repeat(1024 * 1024 + 1)
+  });
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.responses.at(-1).status, 413);
+
+  for (let index = 0; index < 32; index++) {
+    harness.dispatch({
+      marker: "omajdownload-cnl-request-v1", type: "request", id: `request-${index}`,
+      url: "http://127.0.0.1:9666/flash/add", method: "POST", probe: false, body: "urls=ok"
+    });
+  }
+  assert.equal(harness.sent.length, 32);
+  harness.dispatch({
+    marker: "omajdownload-cnl-request-v1", type: "request", id: "overflow",
+    url: "http://127.0.0.1:9666/flash/add", method: "POST", probe: false, body: "urls=overflow"
+  });
+  assert.equal(harness.sent.length, 32);
+  assert.equal(harness.responses.at(-1).status, 429);
+  harness.dispatch({ marker: "omajdownload-cnl-request-v1", type: "cancel", id: "request-0" });
+  harness.dispatch({
+    marker: "omajdownload-cnl-request-v1", type: "request", id: "replacement",
+    url: "http://127.0.0.1:9666/flash/add", method: "POST", probe: false, body: "urls=replacement"
+  });
+  assert.equal(harness.sent.length, 34);
+});
+
 test("page bridge preserves fetch(Request) bodies and original usability", async () => {
   const harness = pageHarness();
   const request = new Request("http://127.0.0.1:9666/flash/add", {

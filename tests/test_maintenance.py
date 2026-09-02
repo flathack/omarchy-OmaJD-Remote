@@ -99,12 +99,14 @@ class InstallerTransactionTests(unittest.TestCase):
 
 
 class WorkflowPinTests(unittest.TestCase):
-    def test_ci_and_release_inputs_are_immutable(self):
+    def test_ci_and_release_build_inputs_are_pinned(self):
         workflows = "\n".join(
             (PROJECT / ".github" / "workflows" / name).read_text(encoding="utf-8")
             for name in ("ci.yml", "release.yml")
         )
         self.assertNotIn("ubuntu-latest", workflows)
+        self.assertEqual(workflows.count("runs-on: ubuntu-24.04"), 6)
+        self.assertEqual(workflows.count("container: archlinux:base@sha256:"), 6)
         self.assertNotIn("actions/checkout@v", workflows)
         self.assertNotIn("actions/setup-python@", workflows)
         self.assertNotIn("archlinux:base\n", workflows)
@@ -112,6 +114,8 @@ class WorkflowPinTests(unittest.TestCase):
         self.assertIn("archive.archlinux.org/repos/2026/09/01", workflows)
         self.assertIn("d3d23fdddef846ebb98b52122a6ece66211c0daf", workflows)
         self.assertIn("tests/requirements.lock", workflows)
+        reproducibility = (PROJECT / "docs" / "reproducible-builds.md").read_text(encoding="utf-8")
+        self.assertIn("docs.github.com/en/actions/concepts/runners/github-hosted-runners", reproducibility)
 
 
 class BrowserPackagingTests(unittest.TestCase):
