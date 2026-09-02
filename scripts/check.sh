@@ -13,7 +13,7 @@ diff -u \
   <(sort requirements.txt) \
   <(awk '/^[[:alnum:]][^ ]*==/{print $1}' requirements.lock | sort)
 "$python_bin" scripts/verify_release.py >/dev/null
-"$python_bin" -m py_compile jdctl.py scripts/verify_environment.py scripts/prune_environments.py scripts/verify_release.py tests/test_jdctl.py tests/test_ui_contract.py
+"$python_bin" -m py_compile jdctl.py scripts/secure_install.py scripts/verify_environment.py scripts/verify_release.py tests/test_jdctl.py tests/test_ui_contract.py
 bash -n install.sh launcher.sh scripts/check.sh scripts/check-qml.sh scripts/qml-runtime-smoke.sh scripts/setup-dev.sh scripts/build-extension.sh
 qml_formatter="$(command -v qmlformat || true)"
 if [[ -z "$qml_formatter" && -x /usr/lib/qt6/bin/qmlformat ]]; then

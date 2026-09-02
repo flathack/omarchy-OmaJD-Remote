@@ -54,6 +54,9 @@ Item {
     property bool helperRetryPaused: false
     property string helperRetryStatus: ""
     property double daemonStartedAt: 0
+    property string pendingRequestId: ""
+    property string pendingCommand: ""
+    property bool shuttingDown: false
 
     signal addLinksFinished(string requestId, bool ok, bool uncertain)
     signal renameFinished(string requestId, bool ok)
@@ -69,8 +72,23 @@ Item {
             restartTimer.restart();
             return false;
         }
+        if (pendingRequestId !== "") {
+            lastError = "Another JDownloader operation is still in progress";
+            return false;
+        }
+        var requestId = String(message.request_id || "qml-" + (++requestSequence));
+        message.request_id = requestId;
+        pendingRequestId = requestId;
+        pendingCommand = String(message.command || "");
         daemon.write(JSON.stringify(message) + "\n");
+        helperResponseWatchdog.restart();
         return true;
+    }
+
+    function clearPendingResponse() {
+        pendingRequestId = "";
+        pendingCommand = "";
+        helperResponseWatchdog.stop();
     }
 
     function refresh() {
@@ -262,6 +280,7 @@ Item {
         actionStatus = "Installing the isolated Python helper…";
         installer.command = [installerPath];
         installer.running = true;
+        installerWatchdog.restart();
     }
 
     function handleLine(line) {
@@ -274,6 +293,8 @@ Item {
         }
 
         if (data.type === "snapshot") {
+            if (pendingCommand === "refresh")
+                clearPendingResponse();
             helperReady = true;
             helperMissing = false;
             helperOutdated = false;
@@ -308,6 +329,8 @@ Item {
         }
 
         if (data.type === "action") {
+            if (String(data.request_id || "") === pendingRequestId)
+                clearPendingResponse();
             busy = false;
             actionStatus = String(data.message || "");
             lastActionOk = data.ok === true;
@@ -353,6 +376,8 @@ Item {
         }
 
         if (data.type === "cnl_details") {
+            if (String(data.request_id || "") === pendingRequestId)
+                clearPendingResponse();
             if (String(data.id || "") !== cnlExpandedId)
                 return;
             cnlDetailsId = String(data.id || "");
@@ -369,6 +394,7 @@ Item {
         }
 
         if (data.type === "fatal") {
+            clearPendingResponse();
             failPendingAddLinks();
             failPendingRename();
             busy = false;
@@ -400,6 +426,7 @@ Item {
             }
         }
         onExited: function (exitCode) {
+            root.clearPendingResponse();
             root.failPendingAddLinks();
             root.failPendingRename();
             root.connected = false;
@@ -408,7 +435,7 @@ Item {
             root.clearClickNLoadDetails();
             if (exitCode !== 0 && root.lastError === "")
                 root.lastError = "JDownloader helper exited (" + exitCode + ")";
-            if (root.helperMissing)
+            if (root.helperMissing || root.shuttingDown)
                 return;
             var runtime = root.daemonStartedAt > 0 ? Date.now() - root.daemonStartedAt : 0;
             root.helperCrashCount = runtime >= 60000 ? 1 : root.helperCrashCount + 1;
@@ -446,6 +473,8 @@ Item {
             }
         }
         onExited: function (exitCode) {
+            installerWatchdog.stop();
+            installerKillTimer.stop();
             root.installingHelper = false;
             if (exitCode !== 0) {
                 root.lastError = "Helper installation failed (exit " + exitCode + ")";
@@ -471,6 +500,53 @@ Item {
     }
 
     Timer {
+        id: helperResponseWatchdog
+        interval: 30000
+        repeat: false
+        onTriggered: {
+            root.lastError = "JDownloader helper response timed out";
+            root.busy = false;
+            root.failPendingAddLinks();
+            root.failPendingRename();
+            root.clearPendingResponse();
+            if (daemon.running) {
+                daemon.signal(15);
+                daemonKillTimer.restart();
+            }
+        }
+    }
+
+    Timer {
+        id: daemonKillTimer
+        interval: 2000
+        repeat: false
+        onTriggered: if (daemon.running)
+            daemon.signal(9)
+    }
+
+    Timer {
+        id: installerWatchdog
+        interval: 600000
+        repeat: false
+        onTriggered: {
+            root.lastError = "Helper installation timed out";
+            root.installingHelper = false;
+            if (installer.running) {
+                installer.signal(15);
+                installerKillTimer.restart();
+            }
+        }
+    }
+
+    Timer {
+        id: installerKillTimer
+        interval: 2000
+        repeat: false
+        onTriggered: if (installer.running)
+            installer.signal(9)
+    }
+
+    Timer {
         id: statusReset
         interval: 2600
         repeat: false
@@ -479,6 +555,14 @@ Item {
 
     onHelperPathChanged: if (helperPath !== "" && !daemon.running)
         daemon.running = true
-    Component.onDestruction: if (daemon.running)
-        daemon.running = false
+    Component.onDestruction: {
+        shuttingDown = true;
+        restartTimer.stop();
+        helperResponseWatchdog.stop();
+        installerWatchdog.stop();
+        if (installer.running)
+            installer.signal(15);
+        if (daemon.running)
+            daemon.signal(15);
+    }
 }

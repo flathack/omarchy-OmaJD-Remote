@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-02
+
+- Bound the loopback bridge, browser companion, helper IPC, remote response
+  models, and subprocess output with explicit concurrency, byte, and time limits
+- Make helper state and installer publication descriptor-safe, no-follow, private,
+  process-tree aware, and crash-consistent during legacy migration
+- Render all QML `Text` values as plain text and add helper/installer watchdogs
+- Pin CI actions, containers, package snapshots, Omarchy source, and browser-test
+  Python dependencies to immutable inputs
+
 ## [0.6.0] - 2026-08-31
 
 - Add a persistent, keyboard-accessible MyJDownloader connection switch to the
@@ -93,7 +103,8 @@ All notable changes to this project will be documented in this file.
 - One-click isolated helper installation
 - Animated theme-aware OmaJD-Remote mark
 
-[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/flathack/omarchy-OmaJD-Remote/compare/v0.4.0...v0.5.0

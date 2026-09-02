@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 import os
 import queue
 import re
 import select
+import signal
+import socket
+import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -23,6 +26,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 import myjdapi
+import requests
 from Crypto.Cipher import AES
 
 
@@ -34,10 +38,22 @@ POLL_SECONDS = 5.0
 DEVICE_REFRESH_SECONDS = 15.0
 PACKAGE_REFRESH_SECONDS = 30.0
 PACKAGE_PAGE_SIZE = 60
-PACKAGE_MODEL_LIMIT = 6000
+PACKAGE_MODEL_LIMIT = 1000
+DEVICE_MODEL_LIMIT = 128
+REMOTE_RESPONSE_BYTE_LIMIT = 8 * 1024 * 1024
+REMOTE_CALL_TIMEOUT = 20.0
+IPC_LINE_BYTE_LIMIT = 256 * 1024
+IPC_OUTPUT_BYTE_LIMIT = 4 * 1024 * 1024
+IPC_STRING_LIMIT = 4096
+IPC_DISPLAY_STRING_LIMIT = 512
+IPC_ID_LIMIT = 256
+IPC_ID_LIST_LIMIT = 64
+CONFIG_BYTE_LIMIT = 64 * 1024
 CNL_HOST = "127.0.0.1"
 CNL_PORT = int(os.environ.get("OMAJDOWNLOAD_CNL_PORT", "9666"))
 CNL_BODY_LIMIT = 1024 * 1024
+CNL_REQUEST_TIMEOUT = 5.0
+CNL_MAX_WORKERS = 8
 CNL_INBOX_LIMIT = 30
 CNL_INBOX_BYTE_LIMIT = 4 * 1024 * 1024
 CNL_REQUEST_LINK_LIMIT = 2000
@@ -46,10 +62,159 @@ CNL_DETAIL_LINK_LIMIT = 200
 CNL_EVENT_LIMIT = 32
 CNL_EVENT_DRAIN_LIMIT = 8
 CNL_SOURCE_LABEL_LIMIT = 256
+CNL_LINK_STRING_LIMIT = 8192
+CNL_PASSWORD_STRING_LIMIT = 1024
 CNL_KEY_PATTERN = re.compile(r"return\s+['\"]([0-9a-fA-F]{32})['\"]\s*;?", re.IGNORECASE)
 CNL_PENDING = "pending"
 CNL_SUBMITTING = "submitting"
 CNL_UNCERTAIN = "uncertain"
+
+
+class RemoteResponseTooLarge(RuntimeError):
+    pass
+
+
+class _BoundedRawResponse:
+    """Count decoded response bytes before requests can materialize them."""
+
+    def __init__(self, raw: Any, limit: int) -> None:
+        self.raw = raw
+        self.limit = limit
+        self.count = 0
+
+    def _account(self, chunk: bytes | None) -> bytes | None:
+        if chunk:
+            self.count += len(chunk)
+            if self.count > self.limit:
+                self.raw.close()
+                raise RemoteResponseTooLarge(
+                    f"MyJDownloader response exceeds {human_bytes(self.limit)}"
+                )
+        return chunk
+
+    def read(self, *args: Any, **kwargs: Any) -> bytes:
+        return self._account(self.raw.read(*args, **kwargs)) or b""
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
+        for chunk in self.raw.stream(*args, **kwargs):
+            yield self._account(chunk)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.raw, name)
+
+
+def install_http_bounds() -> None:
+    """Give every myjdapi HTTP call a socket timeout and producer-side cap."""
+    original = requests.sessions.Session.request
+    if getattr(original, "_omajdownload_bounded", False):
+        return
+
+    def bounded_request(session: Any, method: str, url: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", (5.0, REMOTE_CALL_TIMEOUT))
+        kwargs["stream"] = True
+        response = original(session, method, url, **kwargs)
+        declared = response.headers.get("Content-Length")
+        if declared:
+            try:
+                if int(declared) > REMOTE_RESPONSE_BYTE_LIMIT:
+                    response.close()
+                    raise RemoteResponseTooLarge(
+                        f"MyJDownloader response exceeds {human_bytes(REMOTE_RESPONSE_BYTE_LIMIT)}"
+                    )
+            except ValueError:
+                response.close()
+                raise RuntimeError("MyJDownloader returned an invalid Content-Length")
+        response.raw = _BoundedRawResponse(response.raw, REMOTE_RESPONSE_BYTE_LIMIT)
+        return response
+
+    bounded_request._omajdownload_bounded = True  # type: ignore[attr-defined]
+    requests.sessions.Session.request = bounded_request
+
+
+@contextlib.contextmanager
+def absolute_deadline(seconds: float, operation: str) -> Any:
+    """Interrupt a synchronous remote call at an absolute wall-clock deadline."""
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
+        yield
+        return
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"{operation} exceeded its {seconds:g}-second deadline")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def remote_call(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    with absolute_deadline(REMOTE_CALL_TIMEOUT, "MyJDownloader request"):
+        return call(*args, **kwargs)
+
+
+def run_bounded_subprocess(
+    arguments: list[str],
+    *,
+    input_text: str | None = None,
+    timeout: float,
+    output_limit: int = 16 * 1024,
+) -> subprocess.CompletedProcess[str]:
+    """Run a local helper with an absolute deadline and bounded captured output."""
+    process = subprocess.Popen(
+        arguments,
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        if process.stdin is not None:
+            encoded_input = input_text.encode("utf-8")
+            if len(encoded_input) > 4096:
+                raise ValueError("Secret input is too large")
+            process.stdin.write(encoded_input)
+            process.stdin.close()
+        assert process.stdout is not None and process.stderr is not None
+        descriptors = {process.stdout.fileno(): bytearray(), process.stderr.fileno(): bytearray()}
+        deadline = time.monotonic() + timeout
+        open_descriptors = set(descriptors)
+        while open_descriptors:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(arguments, timeout)
+            readable, _, _ = select.select(list(open_descriptors), [], [], min(0.25, remaining))
+            for descriptor in readable:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    open_descriptors.remove(descriptor)
+                    continue
+                target = descriptors[descriptor]
+                if len(target) < output_limit:
+                    target.extend(chunk[: output_limit + 1 - len(target)])
+        code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        if any(len(value) > output_limit for value in descriptors.values()):
+            raise RuntimeError("Local helper output exceeded its limit")
+        return subprocess.CompletedProcess(
+            arguments,
+            code,
+            bytes(descriptors[process.stdout.fileno()]).decode("utf-8", "replace"),
+            bytes(descriptors[process.stderr.fileno()]).decode("utf-8", "replace"),
+        )
+    except BaseException:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            except ProcessLookupError:
+                pass
+        raise
 
 
 class StateFileError(RuntimeError):
@@ -70,12 +235,96 @@ class PackageQueryResult:
     truncated: bool = False
 
 
+def open_private_directory(path: Path, *, create: bool) -> int:
+    """Open a directory without following any path component symlinks."""
+    absolute = path.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open("/", flags)
+    try:
+        for part in absolute.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+                child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        details = os.fstat(descriptor)
+        if details.st_uid != os.getuid():
+            raise PermissionError(f"State directory is not owned by uid {os.getuid()}: {path}")
+        if details.st_mode & 0o077:
+            os.fchmod(descriptor, 0o700)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _validate_state_file(directory_fd: int, name: str) -> os.stat_result:
+    details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode):
+        raise StateFileError(Path(name), "State path must be a regular file")
+    if details.st_uid != os.getuid():
+        raise StateFileError(Path(name), "State file is not owned by the current user")
+    return details
+
+
+def read_private_json(path: Path, byte_limit: int) -> Any:
+    directory_fd = open_private_directory(path.parent, create=False)
+    descriptor = -1
+    try:
+        details = _validate_state_file(directory_fd, path.name)
+        if details.st_size > byte_limit:
+            raise StateFileError(path, f"State file exceeds {human_bytes(byte_limit)}")
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid():
+            raise StateFileError(path, "State file changed while it was being opened")
+        if details.st_mode & 0o077:
+            os.fchmod(descriptor, 0o600)
+        chunks: list[bytes] = []
+        remaining = byte_limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        if len(encoded) > byte_limit:
+            raise StateFileError(path, f"State file exceeds {human_bytes(byte_limit)}")
+        return json.loads(encoded.decode("utf-8"))
+    except FileNotFoundError:
+        raise
+    except StateFileError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StateFileError(path, f"Could not read state: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
 def atomic_write_json(path: Path, data: Any, *, ensure_ascii: bool = True) -> None:
     """Atomically and durably replace a private JSON state file."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     encoded = (json.dumps(data, ensure_ascii=ensure_ascii, indent=2) + "\n").encode("utf-8")
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temp = Path(temp_name)
+    if len(encoded) > CNL_INBOX_BYTE_LIMIT:
+        raise OSError(f"State exceeds {human_bytes(CNL_INBOX_BYTE_LIMIT)}")
+    directory_fd = open_private_directory(path.parent, create=True)
+    temp_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(
+        temp_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
     replaced = False
     try:
         os.fchmod(fd, 0o600)
@@ -84,37 +333,125 @@ def atomic_write_json(path: Path, data: Any, *, ensure_ascii: bool = True) -> No
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
-        replaced = True
-        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
-            try:
-                os.fsync(directory_fd)
-            except OSError as exc:
-                raise StateCommitError(f"Could not synchronize {path.name} directory entry: {exc}", committed=True) from exc
-        finally:
-            os.close(directory_fd)
+            _validate_state_file(directory_fd, path.name)
+        except FileNotFoundError:
+            pass
+        os.replace(temp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        replaced = True
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise StateCommitError(f"Could not synchronize {path.name} directory entry: {exc}", committed=True) from exc
     finally:
         if fd >= 0:
             os.close(fd)
         if not replaced:
             try:
-                temp.unlink(missing_ok=True)
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
             except OSError:
                 pass
+        os.close(directory_fd)
 
 
 def emit(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > IPC_OUTPUT_BYTE_LIMIT:
+        raise RuntimeError(f"Helper response exceeds {human_bytes(IPC_OUTPUT_BYTE_LIMIT)}")
+    print(encoded, flush=True)
 
 
 def text(value: Any, fallback: str = "") -> str:
     return fallback if value is None else str(value)
 
 
+def bounded_text(value: Any, limit: int = IPC_DISPLAY_STRING_LIMIT, fallback: str = "") -> str:
+    result = text(value, fallback)
+    return result if len(result) <= limit else result[: limit - 1] + "…"
+
+
+def required_text(value: Any, field: str, limit: int = IPC_STRING_LIMIT, *, empty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if len(value) > limit:
+        raise ValueError(f"{field} exceeds {limit} characters")
+    if not empty and not value.strip():
+        raise ValueError(f"{field} must not be empty")
+    return value
+
+
+def id_list(value: Any, field: str = "package_ids") -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field} must be a non-empty array")
+    if len(value) > IPC_ID_LIST_LIMIT:
+        raise ValueError(f"{field} exceeds {IPC_ID_LIST_LIMIT} entries")
+    return [required_text(item, field, IPC_ID_LIMIT).strip() for item in value]
+
+
+def validate_request(request: dict[str, Any]) -> None:
+    command = required_text(request.get("command"), "command", 64).strip()
+    common = {"command", "request_id"}
+    schemas: dict[str, set[str]] = {
+        "refresh": common,
+        "configure": common | {"email", "password"},
+        "set_connection_enabled": common | {"enabled"},
+        "forget": common,
+        "select_device": common | {"device_id"},
+        "control": common | {"action"},
+        "force_download": common | {"package_ids"},
+        "add_links": common | {"links", "autostart", "retry_token", "duplicate_confirmed"},
+        "retry_add_links": common | {"links", "autostart", "retry_token", "duplicate_confirmed"},
+        "move_grabber": common | {"package_ids"},
+        "rename_grabber": common | {"package_id", "name"},
+        "remove_downloads": common | {"package_ids"},
+        "remove_grabber": common | {"package_ids"},
+        "cnl_accept": common | {"id", "autostart"},
+        "cnl_retry": common | {"id", "autostart"},
+        "cnl_reject": common | {"id"},
+        "cnl_details": common | {"id"},
+    }
+    allowed = schemas.get(command)
+    if allowed is None:
+        raise ValueError("Unknown command")
+    unexpected = set(request) - allowed
+    if unexpected:
+        raise ValueError(f"Unexpected request field: {sorted(unexpected)[0]}")
+    if "request_id" in request:
+        required_text(request["request_id"], "request_id", IPC_ID_LIMIT, empty=True)
+    if command == "configure":
+        required_text(request.get("email"), "email", 320)
+        required_text(request.get("password"), "password", 1024)
+    elif command == "set_connection_enabled":
+        if type(request.get("enabled")) is not bool:
+            raise ValueError("enabled must be a boolean")
+    elif command == "select_device":
+        required_text(request.get("device_id"), "device_id", IPC_ID_LIMIT)
+    elif command == "control":
+        if request.get("action") not in {"start", "stop", "pause", "resume"}:
+            raise ValueError("Unknown download control action")
+    elif command in {"force_download", "move_grabber", "remove_downloads", "remove_grabber"}:
+        id_list(request.get("package_ids"))
+    elif command in {"add_links", "retry_add_links"}:
+        required_text(request.get("links"), "links", IPC_LINE_BYTE_LIMIT // 2)
+        if "retry_token" in request:
+            required_text(request["retry_token"], "retry_token", IPC_ID_LIMIT, empty=True)
+        for field in ("autostart", "duplicate_confirmed"):
+            if field in request and type(request[field]) is not bool:
+                raise ValueError(f"{field} must be a boolean")
+    elif command == "rename_grabber":
+        required_text(request.get("package_id"), "package_id", IPC_ID_LIMIT)
+        required_text(request.get("name"), "name", IPC_DISPLAY_STRING_LIMIT)
+    elif command in {"cnl_accept", "cnl_retry", "cnl_reject", "cnl_details"}:
+        required_text(request.get("id"), "id", IPC_ID_LIMIT)
+        if "autostart" in request and type(request["autostart"]) is not bool:
+            raise ValueError("autostart must be a boolean")
+
+
 def number(value: Any) -> int:
     try:
-        return int(value or 0)
+        return max(-(2**63), min(2**63 - 1, int(value or 0)))
     except (TypeError, ValueError):
         return 0
 
@@ -133,45 +470,121 @@ def human_bytes(value: int, suffix: str = "") -> str:
 
 def read_config() -> dict[str, Any]:
     try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        data = read_private_json(CONFIG_FILE, CONFIG_BYTE_LIMIT)
     except FileNotFoundError:
         return {}
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, StateFileError, json.JSONDecodeError) as exc:
         raise StateFileError(CONFIG_FILE, f"Could not read configuration: {exc}") from exc
     if not isinstance(data, dict):
         raise StateFileError(CONFIG_FILE, "Configuration must contain a JSON object")
+    if set(data) - {"email", "selected_device_id", "connection_enabled"}:
+        raise StateFileError(CONFIG_FILE, "Configuration contains unknown fields")
+    try:
+        if "email" in data:
+            required_text(data["email"], "email", 320)
+        if "selected_device_id" in data:
+            required_text(data["selected_device_id"], "selected_device_id", IPC_ID_LIMIT)
+        if "connection_enabled" in data and type(data["connection_enabled"]) is not bool:
+            raise ValueError("connection_enabled must be a boolean")
+    except ValueError as exc:
+        raise StateFileError(CONFIG_FILE, str(exc)) from exc
     return data
 
 
 def write_config(data: dict[str, Any]) -> None:
+    if len(json.dumps(data).encode("utf-8")) > CONFIG_BYTE_LIMIT:
+        raise OSError(f"Configuration exceeds {human_bytes(CONFIG_BYTE_LIMIT)}")
     atomic_write_json(CONFIG_FILE, data)
 
 
 def read_inbox() -> list[dict[str, Any]]:
     try:
-        data = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
+        data = read_private_json(INBOX_FILE, CNL_INBOX_BYTE_LIMIT)
     except FileNotFoundError:
         return []
     except (OSError, json.JSONDecodeError) as exc:
         raise StateFileError(INBOX_FILE, f"Could not read Click'n'Load inbox: {exc}") from exc
     if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
         raise StateFileError(INBOX_FILE, "Click'n'Load inbox must contain a JSON array of objects")
+    if len(data) > CNL_INBOX_LIMIT:
+        raise StateFileError(INBOX_FILE, f"Click'n'Load inbox exceeds {CNL_INBOX_LIMIT} requests")
+    total_links = 0
+    try:
+        for item in data:
+            links = item.get("links", [])
+            passwords = item.get("passwords", [])
+            if not isinstance(links, list) or not isinstance(passwords, list):
+                raise ValueError("Click'n'Load links and passwords must be arrays")
+            if len(links) > CNL_REQUEST_LINK_LIMIT or len(passwords) > CNL_REQUEST_LINK_LIMIT:
+                raise ValueError("Click'n'Load item contains too many values")
+            total_links += len(links)
+            for value in links:
+                required_text(value, "Click'n'Load link", CNL_LINK_STRING_LIMIT)
+            for value in passwords:
+                required_text(value, "Click'n'Load password", CNL_PASSWORD_STRING_LIMIT, empty=True)
+            for field in ("id", "status"):
+                if field in item:
+                    required_text(item[field], field, IPC_ID_LIMIT, empty=True)
+            for field in ("claimed_source", "source", "origin", "received_at"):
+                if field in item:
+                    required_text(item[field], field, IPC_DISPLAY_STRING_LIMIT, empty=True)
+        if total_links > CNL_INBOX_LINK_LIMIT:
+            raise ValueError(f"Click'n'Load inbox exceeds {CNL_INBOX_LINK_LIMIT} links")
+    except ValueError as exc:
+        raise StateFileError(INBOX_FILE, str(exc)) from exc
     return data
 
 
 def write_inbox(data: list[dict[str, Any]]) -> None:
+    encoded_size = len((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    if encoded_size > CNL_INBOX_BYTE_LIMIT:
+        raise OSError(f"Click'n'Load inbox exceeds {human_bytes(CNL_INBOX_BYTE_LIMIT)}")
     atomic_write_json(INBOX_FILE, data, ensure_ascii=False)
 
 
 def quarantine_state_file(path: Path) -> Path:
     suffix = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
     backup = path.with_name(f"{path.name}.corrupt-{suffix}")
-    path.replace(backup)
+    directory_fd = open_private_directory(path.parent, create=False)
+    try:
+        _validate_state_file(directory_fd, path.name)
+        os.rename(path.name, backup.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
     return backup
 
 
-def split_lines(value: str) -> list[str]:
-    return [line.strip() for line in value.replace("\r", "\n").split("\n") if line.strip()]
+def unlink_state_file(path: Path) -> None:
+    directory_fd = open_private_directory(path.parent, create=False)
+    try:
+        try:
+            _validate_state_file(directory_fd, path.name)
+        except FileNotFoundError:
+            return
+        os.unlink(path.name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def split_lines(
+    value: str,
+    *,
+    item_limit: int = CNL_REQUEST_LINK_LIMIT,
+    string_limit: int = CNL_LINK_STRING_LIMIT,
+) -> list[str]:
+    rows: list[str] = []
+    for source in value.replace("\r", "\n").split("\n"):
+        line = source.strip()
+        if not line:
+            continue
+        if len(line) > string_limit:
+            raise ValueError(f"Click'n'Load field exceeds {string_limit} characters")
+        rows.append(line)
+        if len(rows) > item_limit:
+            raise OverflowError(f"Click'n'Load request has more than {item_limit} values")
+    return rows
 
 
 def decrypt_cnl2(jk: str, crypted: str) -> str:
@@ -207,7 +620,11 @@ def parse_cnl_payload(path: str, fields: dict[str, list[str]]) -> dict[str, Any]
     links = split_lines(links_text)
     if not links:
         raise ValueError("Click'n'Load did not contain any links")
-    passwords = split_lines((fields.get("passwords") or [""])[0])
+    passwords = split_lines(
+        (fields.get("passwords") or [""])[0],
+        item_limit=CNL_REQUEST_LINK_LIMIT,
+        string_limit=CNL_PASSWORD_STRING_LIMIT,
+    )
     source = ((fields.get("source") or [""])[0]).strip()
     return {"links": links, "passwords": passwords, "source": source, "encrypted": encrypted}
 
@@ -256,6 +673,38 @@ def link_hosts(links: list[Any]) -> list[str]:
     return hosts
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = CNL_MAX_WORKERS
+
+    def __init__(self, *args: Any, max_workers: int = CNL_MAX_WORKERS, **kwargs: Any) -> None:
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._worker_slots.acquire(blocking=False):
+            try:
+                request.settimeout(0.25)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
+
+
 class ClickNLoadServer:
     def __init__(
         self,
@@ -263,11 +712,15 @@ class ClickNLoadServer:
         events: queue.Queue[dict[str, Any]],
         host: str = CNL_HOST,
         port: int = CNL_PORT,
+        max_workers: int = CNL_MAX_WORKERS,
     ) -> None:
         self.admit = admit
         self.events = events
         self.host = host
         self.requested_port = port
+        if max_workers < 1 or max_workers > CNL_MAX_WORKERS:
+            raise ValueError(f"max_workers must be between 1 and {CNL_MAX_WORKERS}")
+        self.max_workers = max_workers
         self.httpd: ThreadingHTTPServer | None = None
         self.error = ""
         self.extension_token = uuid.uuid4().hex
@@ -304,6 +757,26 @@ class ClickNLoadServer:
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "OmaJD-Remote-CNL/1"
+
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(CNL_REQUEST_TIMEOUT)
+
+            def read_body(self, size: int) -> bytes:
+                deadline = time.monotonic() + CNL_REQUEST_TIMEOUT
+                remaining = size
+                chunks: list[bytes] = []
+                while remaining:
+                    available = deadline - time.monotonic()
+                    if available <= 0:
+                        raise TimeoutError("Click'n'Load request timed out")
+                    self.connection.settimeout(min(CNL_REQUEST_TIMEOUT, available))
+                    chunk = self.rfile.read1(min(65536, remaining))
+                    if not chunk:
+                        raise ValueError("Click'n'Load request ended before its declared length")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                return b"".join(chunks)
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
@@ -364,7 +837,7 @@ class ClickNLoadServer:
                     self.reply(413, "Click'n'Load payload is empty or too large")
                     return
                 try:
-                    raw = self.rfile.read(size).decode("utf-8")
+                    raw = self.read_body(size).decode("utf-8")
                     fields = parse_qs(raw, keep_blank_values=True, max_num_fields=24)
                     payload = parse_cnl_payload(endpoint, fields)
                     trusted_extension = self.headers.get("X-OmaJDownLoad-Token", "") == owner.extension_token
@@ -375,6 +848,9 @@ class ClickNLoadServer:
                     payload["origin_verified"] = bool(browser_origin or http_origin)
                     owner.admit(payload)
                     self.reply(200, "success\r\n")
+                except TimeoutError as exc:
+                    report_error(str(exc))
+                    self.reply(408, str(exc))
                 except (UnicodeDecodeError, ValueError) as exc:
                     report_error(str(exc))
                     self.reply(400, str(exc))
@@ -386,7 +862,9 @@ class ClickNLoadServer:
                     self.reply(503, "Could not persist Click'n'Load request")
 
         try:
-            self.httpd = ThreadingHTTPServer((self.host, self.requested_port), Handler)
+            self.httpd = BoundedThreadingHTTPServer(
+                (self.host, self.requested_port), Handler, max_workers=self.max_workers
+            )
             self.httpd.daemon_threads = True
             thread = threading.Thread(target=self.httpd.serve_forever, name="omajdownload-cnl", daemon=True)
             thread.start()
@@ -405,11 +883,9 @@ class ClickNLoadServer:
 def secret_lookup(email: str) -> str | None:
     if not email:
         return None
-    result = subprocess.run(
+    required_text(email, "email", 320)
+    result = run_bounded_subprocess(
         ["secret-tool", "lookup", "omarchy-plugin", "omajdownload", "account", email],
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=10,
     )
     if result.returncode == 0:
@@ -420,7 +896,9 @@ def secret_lookup(email: str) -> str | None:
 
 
 def secret_store(email: str, password: str) -> None:
-    result = subprocess.run(
+    required_text(email, "email", 320)
+    required_text(password, "password", 1024)
+    result = run_bounded_subprocess(
         [
             "secret-tool",
             "store",
@@ -430,9 +908,7 @@ def secret_store(email: str, password: str) -> None:
             "account",
             email,
         ],
-        input=password,
-        text=True,
-        capture_output=True,
+        input_text=password,
         timeout=30,
     )
     if result.returncode != 0:
@@ -442,11 +918,9 @@ def secret_store(email: str, password: str) -> None:
 def secret_clear(email: str) -> None:
     if not email:
         return
-    result = subprocess.run(
+    required_text(email, "email", 320)
+    result = run_bounded_subprocess(
         ["secret-tool", "clear", "omarchy-plugin", "omajdownload", "account", email],
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=10,
     )
     if result.returncode != 0 and result.stderr.strip():
@@ -461,14 +935,18 @@ def query_all_packages(query: Any, fields: dict[str, Any]) -> PackageQueryResult
         params = dict(fields)
         params["maxResults"] = PACKAGE_PAGE_SIZE
         params["startAt"] = page * PACKAGE_PAGE_SIZE
-        batch = query([params]) or []
+        batch = remote_call(query, [params]) or []
         if not isinstance(batch, list):
             raise RuntimeError("JDownloader returned an invalid package list")
+        if len(batch) > PACKAGE_PAGE_SIZE:
+            raise RuntimeError("JDownloader returned an oversized package page")
         signature = tuple(package_uuid(row) for row in batch if isinstance(row, dict))
         if batch and signature in seen_pages:
             raise RuntimeError("JDownloader package pagination repeated a page")
         seen_pages.add(signature)
         rows.extend(row for row in batch if isinstance(row, dict))
+        if len(rows) > PACKAGE_MODEL_LIMIT:
+            return PackageQueryResult(rows[:PACKAGE_MODEL_LIMIT], truncated=True)
         if len(batch) < PACKAGE_PAGE_SIZE:
             return PackageQueryResult(rows)
         page += 1
@@ -476,9 +954,11 @@ def query_all_packages(query: Any, fields: dict[str, Any]) -> PackageQueryResult
     params = dict(fields)
     params["maxResults"] = 1
     params["startAt"] = len(rows)
-    remainder = query([params]) or []
+    remainder = remote_call(query, [params]) or []
     if not isinstance(remainder, list):
         raise RuntimeError("JDownloader returned an invalid package list")
+    if len(remainder) > 1:
+        raise RuntimeError("JDownloader returned an oversized package remainder")
     return PackageQueryResult(rows[:PACKAGE_MODEL_LIMIT], truncated=bool(remainder))
 
 
@@ -488,7 +968,7 @@ def package_uuid(row: dict[str, Any]) -> str:
         if isinstance(value, list):
             value = value[0] if value else ""
         if value not in (None, ""):
-            return str(value)
+            return bounded_text(value, IPC_ID_LIMIT)
     return ""
 
 
@@ -499,8 +979,12 @@ def normalize_package(row: Any, kind: str) -> dict[str, Any]:
     total = number(row.get("bytesTotal"))
     speed = number(row.get("speed"))
     progress = round((loaded / total) * 100) if total > 0 else 0
-    name = text(row.get("name") or row.get("packageName") or row.get("comment"), "Unnamed package")
-    status = text(row.get("status") or row.get("availability"), "")
+    name = bounded_text(
+        row.get("name") or row.get("packageName") or row.get("comment"),
+        IPC_DISPLAY_STRING_LIMIT,
+        "Unnamed package",
+    )
+    status = bounded_text(row.get("status") or row.get("availability"), IPC_DISPLAY_STRING_LIMIT)
     running = bool(row.get("running")) or speed > 0
     return {
         "uuid": package_uuid(row),
@@ -522,6 +1006,7 @@ def normalize_package(row: Any, kind: str) -> dict[str, Any]:
 
 class Bridge:
     def __init__(self, start_cnl: bool = True, cnl_port: int = CNL_PORT) -> None:
+        install_http_bounds()
         self.state_warnings: list[str] = []
         self.config_write_blocked = False
         self.inbox_write_blocked = False
@@ -635,12 +1120,24 @@ class Bridge:
             self.device = None
             return
         if update:
-            self.jd.update_devices()
-        rows = self.jd.list_devices() or []
+            remote_call(self.jd.update_devices)
+        rows = remote_call(self.jd.list_devices) or []
+        if not isinstance(rows, list):
+            raise RuntimeError("MyJDownloader returned an invalid device list")
+        if len(rows) > DEVICE_MODEL_LIMIT:
+            raise RuntimeError(f"MyJDownloader returned more than {DEVICE_MODEL_LIMIT} devices")
+        if any(not isinstance(item, dict) for item in rows):
+            raise RuntimeError("MyJDownloader returned an invalid device entry")
         self.devices = [
-            {"id": text(item.get("id")), "name": text(item.get("name"), "JDownloader"), "type": text(item.get("type"))}
+            {
+                "id": bounded_text(item.get("id"), IPC_ID_LIMIT),
+                "name": bounded_text(item.get("name"), IPC_DISPLAY_STRING_LIMIT, "JDownloader"),
+                "type": bounded_text(item.get("type"), 64),
+            }
             for item in rows
         ]
+        if any(not item["id"] for item in self.devices):
+            raise RuntimeError("MyJDownloader returned a device without an ID")
         online_ids = {item["id"] for item in self.devices}
         current_id = text(getattr(self.device, "device_id", ""))
         preferred = self.selected_id
@@ -650,8 +1147,8 @@ class Bridge:
         if not target:
             self.device = None
         elif self.device is None or current_id != target:
-            self.device = self.jd.get_device(device_id=target)
-            self.device.disable_direct_connection()
+            self.device = remote_call(self.jd.get_device, device_id=target)
+            remote_call(self.device.disable_direct_connection)
             self.cached_downloads = []
             self.cached_grabber = []
             self.last_package_refresh = 0.0
@@ -666,7 +1163,7 @@ class Bridge:
 
         jd = myjdapi.Myjdapi()
         jd.set_app_key(APP_KEY)
-        jd.connect(account, credential)
+        remote_call(jd.connect, account, credential)
         self.jd = jd
         if self.email and self.email != account:
             self.config.pop("selected_device_id", None)
@@ -676,8 +1173,8 @@ class Bridge:
 
     def disconnect(self) -> None:
         try:
-            if self.jd is not None and self.jd.is_connected():
-                self.jd.disconnect()
+            if self.jd is not None and remote_call(self.jd.is_connected):
+                remote_call(self.jd.disconnect)
         except Exception:
             pass
         self.jd = None
@@ -733,7 +1230,7 @@ class Bridge:
             total_links = sum(len(entry.get("links", [])) for entry in updated)
             if total_links > CNL_INBOX_LINK_LIMIT:
                 raise OverflowError(f"Click'n'Load inbox exceeds {CNL_INBOX_LINK_LIMIT} links")
-            total_bytes = sum(self.inbox_item_size(entry) for entry in updated)
+            total_bytes = len((json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
             if total_bytes > CNL_INBOX_BYTE_LIMIT:
                 raise OverflowError(f"Click'n'Load inbox exceeds {human_bytes(CNL_INBOX_BYTE_LIMIT)}")
             try:
@@ -840,8 +1337,12 @@ class Bridge:
                     "add_links_retry_token": text((self.uncertain_add_links or {}).get("token")),
                 })
                 return
-            controller = text(self.device.downloadcontroller.get_current_state(), "IDLE")
-            speed = number(self.device.downloadcontroller.get_speed_in_bytes())
+            controller = bounded_text(
+                remote_call(self.device.downloadcontroller.get_current_state),
+                IPC_DISPLAY_STRING_LIMIT,
+                "IDLE",
+            )
+            speed = number(remote_call(self.device.downloadcontroller.get_speed_in_bytes))
             packages_due = refresh or self.last_package_refresh == 0.0 \
                 or time.monotonic() - self.last_package_refresh >= PACKAGE_REFRESH_SECONDS
             if packages_due:
@@ -862,7 +1363,9 @@ class Bridge:
                     self.downloads_truncated = download_result.truncated
                     self.download_error = ""
                 except Exception as exc:
-                    self.download_error = str(exc).strip() or "Could not refresh downloads"
+                    self.download_error = bounded_text(
+                        str(exc).strip() or "Could not refresh downloads", IPC_DISPLAY_STRING_LIMIT
+                    )
                 try:
                     grabber_result = query_all_packages(self.device.linkgrabber.query_packages, {
                         "availableOfflineCount": True,
@@ -877,7 +1380,9 @@ class Bridge:
                     self.grabber_truncated = grabber_result.truncated
                     self.grabber_error = ""
                 except Exception as exc:
-                    self.grabber_error = str(exc).strip() or "Could not refresh LinkGrabber"
+                    self.grabber_error = bounded_text(
+                        str(exc).strip() or "Could not refresh LinkGrabber", IPC_DISPLAY_STRING_LIMIT
+                    )
                 self.last_package_refresh = time.monotonic()
             active = sum(1 for item in self.cached_downloads if item["running"])
             selected_name = next(
@@ -908,7 +1413,9 @@ class Bridge:
             })
             self.last_error = ""
         except Exception as exc:
-            self.last_error = str(exc).strip() or exc.__class__.__name__
+            self.last_error = bounded_text(
+                str(exc).strip() or exc.__class__.__name__, IPC_DISPLAY_STRING_LIMIT
+            )
             display_error = " · ".join(value for value in (self.last_error, self.state_warning) if value)
             self.disconnect()
             emit({
@@ -945,9 +1452,9 @@ class Bridge:
         emit({
             "type": "action",
             "ok": ok,
-            "message": message,
-            "command": text(source.get("command")),
-            "request_id": text(source.get("request_id")),
+            "message": bounded_text(message, IPC_STRING_LIMIT),
+            "command": bounded_text(source.get("command"), 64),
+            "request_id": bounded_text(source.get("request_id"), IPC_ID_LIMIT),
             **details,
         })
 
@@ -1011,7 +1518,7 @@ class Bridge:
         passwords = "\r\n".join(str(value) for value in item.get("passwords", [])) or None
         autostart = request.get("autostart") is True
         try:
-            self.device.linkgrabber.add_links([{
+            remote_call(self.device.linkgrabber.add_links, [{
                 "autostart": autostart,
                 "links": links,
                 "packageName": None,
@@ -1057,7 +1564,13 @@ class Bridge:
         self.action_result(True, "Click'n'Load links added" + (" and queued" if autostart else " to LinkGrabber"), request)
 
     def handle(self, request: dict[str, Any]) -> None:
-        command = text(request.get("command"))
+        try:
+            validate_request(request)
+        except ValueError as exc:
+            request.pop("password", None)
+            self.action_result(False, f"Invalid helper request: {exc}", request)
+            return
+        command = request["command"].strip()
         if command == "refresh":
             self.snapshot(refresh=True)
             self.last_poll = time.monotonic()
@@ -1183,7 +1696,7 @@ class Bridge:
             self.config = {}
             cleanup_warning = ""
             try:
-                CONFIG_FILE.unlink(missing_ok=True)
+                unlink_state_file(CONFIG_FILE)
             except OSError as exc:
                 cleanup_warning = f"; empty configuration file retained: {exc}"
             self.action_result(True, f"MyJDownloader account removed{cleanup_warning}", request)
@@ -1222,6 +1735,7 @@ class Bridge:
             emit({
                 "type": "cnl_details",
                 "id": item_id,
+                "request_id": bounded_text(request.get("request_id"), IPC_ID_LIMIT),
                 "link_urls": links[:CNL_DETAIL_LINK_LIMIT],
                 "hidden_link_count": max(0, len(links) - CNL_DETAIL_LINK_LIMIT),
             })
@@ -1239,8 +1753,8 @@ class Bridge:
                 device_id = text(request.get("device_id"))
                 if not any(item["id"] == device_id for item in self.devices):
                     raise RuntimeError("The selected JDownloader instance is not online")
-                candidate = self.jd.get_device(device_id=device_id)
-                candidate.disable_direct_connection()
+                candidate = remote_call(self.jd.get_device, device_id=device_id)
+                remote_call(candidate.disable_direct_connection)
                 updated_config = dict(self.config)
                 updated_config["selected_device_id"] = device_id
                 persistence_warning = ""
@@ -1261,19 +1775,19 @@ class Bridge:
             elif command == "control":
                 action = text(request.get("action"))
                 if action == "start":
-                    self.device.downloadcontroller.start_downloads()
+                    remote_call(self.device.downloadcontroller.start_downloads)
                 elif action == "stop":
-                    self.device.downloadcontroller.stop_downloads()
+                    remote_call(self.device.downloadcontroller.stop_downloads)
                 elif action == "pause":
-                    self.device.downloadcontroller.pause_downloads(True)
+                    remote_call(self.device.downloadcontroller.pause_downloads, True)
                 elif action == "resume":
-                    self.device.downloadcontroller.pause_downloads(False)
+                    remote_call(self.device.downloadcontroller.pause_downloads, False)
                 else:
                     raise RuntimeError("Unknown download control action")
                 self.action_result(True, f"Downloads: {action}", request)
             elif command == "force_download":
-                ids = [str(value) for value in request.get("package_ids", [])]
-                self.device.downloads.force_download([], ids)
+                ids = id_list(request.get("package_ids"))
+                remote_call(self.device.downloads.force_download, [], ids)
                 self.action_result(True, "Package started", request)
             elif command in ("add_links", "retry_add_links"):
                 links = text(request.get("links")).strip()
@@ -1301,7 +1815,7 @@ class Bridge:
                     )
                     return
                 try:
-                    self.device.linkgrabber.add_links([{
+                    remote_call(self.device.linkgrabber.add_links, [{
                         "autostart": autostart,
                         "links": links,
                         "packageName": None,
@@ -1331,23 +1845,23 @@ class Bridge:
             elif command in ("cnl_accept", "cnl_retry"):
                 self.submit_cnl(request, retry=command == "cnl_retry")
             elif command == "move_grabber":
-                ids = [str(value) for value in request.get("package_ids", [])]
-                self.device.linkgrabber.move_to_downloadlist([], ids)
+                ids = id_list(request.get("package_ids"))
+                remote_call(self.device.linkgrabber.move_to_downloadlist, [], ids)
                 self.action_result(True, "Package moved to downloads", request)
             elif command == "rename_grabber":
                 package_id = text(request.get("package_id")).strip()
                 name = text(request.get("name")).strip()
                 if not package_id or not name:
                     raise RuntimeError("Package ID and name are required")
-                self.device.linkgrabber.rename_package(package_id, name)
+                remote_call(self.device.linkgrabber.rename_package, package_id, name)
                 self.action_result(True, "LinkGrabber package renamed", request)
             elif command == "remove_downloads":
-                ids = [str(value) for value in request.get("package_ids", [])]
-                self.device.downloads.remove_links([], ids)
+                ids = id_list(request.get("package_ids"))
+                remote_call(self.device.downloads.remove_links, [], ids)
                 self.action_result(True, "Download entry removed; files were kept", request)
             elif command == "remove_grabber":
-                ids = [str(value) for value in request.get("package_ids", [])]
-                self.device.linkgrabber.remove_links([], ids)
+                ids = id_list(request.get("package_ids"))
+                remote_call(self.device.linkgrabber.remove_links, [], ids)
                 self.action_result(True, "LinkGrabber entry removed", request)
             else:
                 raise RuntimeError("Unknown command")
@@ -1359,40 +1873,57 @@ class Bridge:
             self.action_result(False, str(exc).strip() or "JDownloader action failed", request)
 
     def run(self) -> None:
-        self.snapshot(refresh=True)
-        self.emit_cnl_state()
-        self.last_poll = time.monotonic()
-        while True:
-            self.drain_cnl_events()
-            timeout = min(0.25, max(0.0, POLL_SECONDS - (time.monotonic() - self.last_poll)))
-            readable, _, _ = select.select([sys.stdin], [], [], timeout)
-            if readable:
-                line = sys.stdin.readline()
-                if line == "":
-                    return
-                try:
-                    request = json.loads(line)
-                    line = ""
-                    if not isinstance(request, dict):
-                        raise ValueError("request must be an object")
+        try:
+            self.snapshot(refresh=True)
+            self.emit_cnl_state()
+            self.last_poll = time.monotonic()
+            while True:
+                self.drain_cnl_events()
+                timeout = min(0.25, max(0.0, POLL_SECONDS - (time.monotonic() - self.last_poll)))
+                readable, _, _ = select.select([sys.stdin.buffer], [], [], timeout)
+                if readable:
+                    encoded = sys.stdin.buffer.readline(IPC_LINE_BYTE_LIMIT + 1)
+                    if encoded == b"":
+                        return
+                    if len(encoded) > IPC_LINE_BYTE_LIMIT or not encoded.endswith(b"\n"):
+                        self.action_result(False, f"Invalid helper request: line exceeds {human_bytes(IPC_LINE_BYTE_LIMIT)}")
+                        return
                     try:
-                        self.handle(request)
-                    finally:
-                        request.pop("password", None)
-                        request.clear()
-                except (json.JSONDecodeError, ValueError) as exc:
-                    line = ""
-                    self.action_result(False, f"Invalid helper request: {exc}")
-            elif time.monotonic() - self.last_poll >= POLL_SECONDS:
-                self.snapshot()
-                self.last_poll = time.monotonic()
+                        request = json.loads(encoded.decode("utf-8"))
+                        encoded = b""
+                        if not isinstance(request, dict):
+                            raise ValueError("request must be an object")
+                        try:
+                            self.handle(request)
+                        finally:
+                            request.pop("password", None)
+                            request.clear()
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                        encoded = b""
+                        self.action_result(False, f"Invalid helper request: {exc}")
+                elif time.monotonic() - self.last_poll >= POLL_SECONDS:
+                    self.snapshot()
+                    self.last_poll = time.monotonic()
+        finally:
+            self.cnl_server.stop()
 
 
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] != "daemon":
         print("usage: jdctl.py daemon", file=sys.stderr)
         return 2
-    Bridge().run()
+    bridge = Bridge()
+
+    def terminate(signum: int, _frame: Any) -> None:
+        bridge.cnl_server.stop()
+        signal.signal(signum, signal.SIG_DFL)
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpgrp(), signum)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGINT, terminate)
+    bridge.run()
     return 0
 
 

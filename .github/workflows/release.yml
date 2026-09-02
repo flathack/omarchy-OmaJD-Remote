@@ -9,12 +9,17 @@ permissions:
 
 jobs:
   qml-semantic:
-    runs-on: ubuntu-latest
-    container: archlinux:base
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     steps:
+      - run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - run: pacman -Syu --noconfirm git qt6-declarative quickshell weston
-      - uses: actions/checkout@v7
-      - run: git clone --depth 1 --branch quattro https://github.com/basecamp/omarchy.git /tmp/omarchy
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: |
+          git init /tmp/omarchy
+          git -C /tmp/omarchy remote add origin https://github.com/basecamp/omarchy.git
+          git -C /tmp/omarchy fetch --depth 1 origin d3d23fdddef846ebb98b52122a6ece66211c0daf
+          git -C /tmp/omarchy checkout --detach FETCH_HEAD
       - env:
           OMARCHY_SHELL_SOURCE: /tmp/omarchy/shell
         run: |
@@ -33,18 +38,19 @@ jobs:
           WAYLAND_DISPLAY=wayland-omajdownload QT_QPA_PLATFORM=wayland ./scripts/qml-runtime-smoke.sh
 
   browser-e2e:
-    runs-on: ubuntu-latest
-    container: archlinux:base
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     steps:
+      - run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - run: >-
           pacman -Syu --noconfirm
           chromium firefox geckodriver python python-pip
           xorg-server-xvfb openssl zip unzip
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           python -m venv --system-site-packages /tmp/omajdownload-e2e
           /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
-          /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check selenium==4.35.0
+          /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check --require-hashes -r tests/requirements.lock
           ./scripts/build-extension.sh
       - env:
           RUN_BROWSER_E2E: "1"
@@ -59,26 +65,24 @@ jobs:
 
   release:
     needs: [qml-semantic, browser-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
+      - run: pacman -Syu --noconfirm git github-cli nodejs python python-pip qt6-declarative shellcheck zip unzip
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-          cache: pip
       - name: Install validation tools
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes qt6-declarative-dev-tools shellcheck zip unzip
-          python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
+          python -m venv /tmp/omajdownload-release
+          /tmp/omajdownload-release/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
       - name: Verify tag and source
         run: |
-          python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
-          REQUIRE_QML_TOOLS=1 REQUIRE_BROWSER_TESTS=1 ./scripts/check.sh
+          /tmp/omajdownload-release/bin/python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
+          PYTHON_BIN=/tmp/omajdownload-release/bin/python REQUIRE_QML_TOOLS=1 REQUIRE_BROWSER_TESTS=1 ./scripts/check.sh
       - name: Build reproducible browser packages
         run: |
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"

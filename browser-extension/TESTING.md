@@ -16,7 +16,8 @@ none may start a download without panel confirmation.
 | Any | form, Fetch, and XHR | More than 1 MiB | Visible failure; no inbox entry |
 | Any | form, Fetch, and XHR | Listener stopped or inbox full | Visible failure; website is not told the request succeeded |
 | Any | Fetch AbortSignal and XHR abort/timeout | Plain `urls` | Standard cancellation events/errors; no late load event or inbox entry |
-| Any | XHR timeout `0` and values above 10 seconds | Plain `urls` | No hidden ten-second bridge timeout; the configured XHR timeout is authoritative |
+| Any | XHR timeout `0` and values above 10 seconds | Plain `urls` | The extension's ten-second absolute safety deadline remains authoritative |
+| Any | More than 32 concurrent requests or an oversized listener response | Plain `urls` | Bounded failure; pending request and response memory does not grow without limit |
 | Two tabs/frames | Equal synthetic request IDs and cancellation | Plain `urls` | Cancelling one sender never aborts or detaches the other sender's request |
 
 Before publication, also inspect both built ZIP files and confirm they contain

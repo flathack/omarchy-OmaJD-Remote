@@ -5,8 +5,10 @@ import json
 import os
 import queue
 import select
+import socket
 import subprocess
 import sys
+import time
 import unittest
 from http import client
 from tempfile import TemporaryDirectory
@@ -58,7 +60,7 @@ class FormattingTests(unittest.TestCase):
 
 
 class CredentialTests(unittest.TestCase):
-    @mock.patch("jdctl.subprocess.run")
+    @mock.patch("jdctl.run_bounded_subprocess")
     def test_secret_lookup_uses_stable_attributes(self, run):
         run.return_value = mock.Mock(returncode=0, stdout="secret\n", stderr="")
         self.assertEqual(jdctl.secret_lookup("me@example.com"), "secret")
@@ -75,7 +77,7 @@ class CredentialTests(unittest.TestCase):
             ],
         )
 
-    @mock.patch("jdctl.subprocess.run")
+    @mock.patch("jdctl.run_bounded_subprocess")
     def test_secret_lookup_distinguishes_missing_from_keyring_failure(self, run):
         run.return_value = mock.Mock(returncode=1, stdout="", stderr="")
         self.assertIsNone(jdctl.secret_lookup("missing@example.com"))
@@ -83,14 +85,14 @@ class CredentialTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "keyring locked"):
             jdctl.secret_lookup("me@example.com")
 
-    @mock.patch("jdctl.subprocess.run")
+    @mock.patch("jdctl.run_bounded_subprocess")
     def test_secret_store_sends_password_over_stdin(self, run):
         run.return_value = mock.Mock(returncode=0, stderr="")
         jdctl.secret_store("me@example.com", "very-secret")
         self.assertNotIn("very-secret", run.call_args.args[0])
-        self.assertEqual(run.call_args.kwargs["input"], "very-secret")
+        self.assertEqual(run.call_args.kwargs["input_text"], "very-secret")
 
-    @mock.patch("jdctl.subprocess.run")
+    @mock.patch("jdctl.run_bounded_subprocess")
     def test_secret_clear_reports_keyring_failure(self, run):
         run.return_value = mock.Mock(returncode=1, stdout="", stderr="keyring is locked\n")
         with self.assertRaisesRegex(RuntimeError, "keyring is locked"):
@@ -131,6 +133,47 @@ class StateWriterTests(unittest.TestCase):
             self.assertTrue(raised.exception.committed)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"new": True})
 
+    def test_atomic_writer_rejects_a_symlink_target(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "outside.json"
+            target.write_text('{"outside": true}\n', encoding="utf-8")
+            path = root / "state.json"
+            path.symlink_to(target)
+            with self.assertRaises(jdctl.StateFileError):
+                jdctl.atomic_write_json(path, {"replaced": True})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"outside": True})
+
+    def test_state_reader_rejects_special_files_without_blocking(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            os.mkfifo(path)
+            started = time.monotonic()
+            with self.assertRaises(jdctl.StateFileError):
+                jdctl.read_private_json(path, 1024)
+            self.assertLess(time.monotonic() - started, 1.0)
+
+
+class BoundaryTests(unittest.TestCase):
+    def test_remote_call_has_an_absolute_deadline(self):
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            with jdctl.absolute_deadline(0.02, "test request"):
+                time.sleep(0.2)
+
+    def test_request_schema_rejects_unbounded_id_arrays(self):
+        request_data = {
+            "command": "force_download",
+            "package_ids": [str(index) for index in range(jdctl.IPC_ID_LIST_LIMIT + 1)],
+        }
+        with self.assertRaisesRegex(ValueError, "entries"):
+            jdctl.validate_request(request_data)
+
+    def test_remote_package_strings_are_display_bounded(self):
+        package = jdctl.normalize_package({"uuid": "x" * 1000, "name": "n" * 5000, "status": "s" * 5000}, "download")
+        self.assertLessEqual(len(package["uuid"]), jdctl.IPC_ID_LIMIT)
+        self.assertLessEqual(len(package["name"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
+        self.assertLessEqual(len(package["status"]), jdctl.IPC_DISPLAY_STRING_LIMIT)
+
 
 class PaginationTests(unittest.TestCase):
     def test_reads_every_package_page(self):
@@ -167,7 +210,7 @@ class PaginationTests(unittest.TestCase):
         self.assertTrue(result.truncated)
 
     def test_real_display_ceiling_and_one_additional_row(self):
-        for total, truncated in ((6000, False), (6001, True)):
+        for total, truncated in ((1000, False), (1001, True)):
             with self.subTest(total=total):
                 packages = [{"uuid": index} for index in range(total)]
 
@@ -177,7 +220,7 @@ class PaginationTests(unittest.TestCase):
                     return packages[start:start + params["maxResults"]]
 
                 result = jdctl.query_all_packages(query, {})
-                self.assertEqual(len(result.rows), 6000)
+                self.assertEqual(len(result.rows), 1000)
                 self.assertEqual(result.truncated, truncated)
 
 
@@ -325,6 +368,50 @@ class ClickNLoadTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 429)
         raised.exception.close()
 
+    def test_slow_request_hits_absolute_socket_deadline(self):
+        server = jdctl.ClickNLoadServer(lambda _payload: None, queue.Queue(), port=0)
+        with mock.patch("jdctl.CNL_REQUEST_TIMEOUT", 0.1):
+            server.start()
+            self.addCleanup(server.stop)
+            connection = socket.create_connection(("127.0.0.1", server.port), timeout=2)
+            self.addCleanup(connection.close)
+            connection.sendall(
+                b"POST /flash/add HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"Content-Length: 20\r\n\r\nurls=x"
+            )
+            response = connection.recv(4096)
+        self.assertIn(b"408", response)
+
+    def test_http_worker_capacity_rejects_excess_connections(self):
+        entered = jdctl.threading.Event()
+        release = jdctl.threading.Event()
+        self.addCleanup(release.set)
+
+        def admit(_payload):
+            entered.set()
+            self.assertTrue(release.wait(3))
+
+        server = jdctl.ClickNLoadServer(
+            admit, queue.Queue(), port=0, max_workers=1
+        )
+        server.start()
+        self.addCleanup(server.stop)
+        endpoint = f"http://127.0.0.1:{server.port}/flash/add"
+        body = parse.urlencode({"urls": "https://example.test/file"}).encode()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                request.urlopen, request.Request(endpoint, data=body), None, 3
+            )
+            self.assertTrue(entered.wait(3))
+            with self.assertRaises(error.HTTPError) as raised:
+                request.urlopen(request.Request(endpoint, data=body), timeout=3)
+            self.assertEqual(raised.exception.code, 503)
+            raised.exception.close()
+            release.set()
+            with first.result(timeout=3) as response:
+                self.assertEqual(response.status, 200)
+
     def test_concurrent_http_admissions_are_all_acknowledged(self):
         admitted = []
         lock = jdctl.threading.Lock()
@@ -420,6 +507,15 @@ class BridgeTests(unittest.TestCase):
         bridge.jd.device_objects["preferred-offline"] = FakeDevice("preferred-offline")
         bridge.refresh_devices()
         self.assertEqual(bridge.active_device_id, "preferred-offline")
+
+    def test_device_model_cardinality_is_bounded(self):
+        bridge = self.make_bridge()
+        bridge.jd = FakeApi([
+            {"id": f"device-{index}", "name": "Server", "type": "jd"}
+            for index in range(jdctl.DEVICE_MODEL_LIMIT + 1)
+        ])
+        with self.assertRaisesRegex(RuntimeError, "devices"):
+            bridge.refresh_devices(update=False)
 
     @mock.patch("jdctl.emit")
     def test_configured_account_without_devices_stays_configured(self, emit):
@@ -789,7 +885,7 @@ class BridgeTests(unittest.TestCase):
     def test_forget_keeps_account_removed_when_empty_config_unlink_fails(self, emit):
         bridge = self.make_bridge()
         bridge.config = {"email": "me@example.com"}
-        with mock.patch("jdctl.secret_clear"), mock.patch("jdctl.write_config"), mock.patch.object(Path, "unlink", side_effect=OSError("read-only")), mock.patch.object(bridge, "snapshot"):
+        with mock.patch("jdctl.secret_clear"), mock.patch("jdctl.write_config"), mock.patch("jdctl.unlink_state_file", side_effect=OSError("read-only")), mock.patch.object(bridge, "snapshot"):
             bridge.handle({"command": "forget"})
         action = emit.call_args.args[0]
         self.assertTrue(action["ok"])
@@ -860,7 +956,7 @@ class BridgeTests(unittest.TestCase):
             bridge.handle({"command": "rename_grabber", "package_id": "42", "name": "   "})
         bridge.device.linkgrabber.rename_package.assert_not_called()
         self.assertFalse(emit.call_args.args[0]["ok"])
-        self.assertIn("required", emit.call_args.args[0]["message"])
+        self.assertIn("must not be empty", emit.call_args.args[0]["message"])
 
     @mock.patch("jdctl.emit")
     def test_configure_and_idempotent_forget_persist_state(self, emit):
@@ -878,7 +974,7 @@ class BridgeTests(unittest.TestCase):
             store.assert_called_once_with("me@example.com", "secret")
             write.assert_called_once()
             self.assertEqual(bridge.email, "me@example.com")
-            with mock.patch.object(Path, "unlink") as unlink:
+            with mock.patch("jdctl.unlink_state_file") as unlink:
                 bridge.handle({"command": "forget"})
                 bridge.handle({"command": "forget"})
             self.assertEqual(unlink.call_count, 2)

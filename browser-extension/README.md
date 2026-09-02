@@ -24,7 +24,10 @@ Dynamic CNL2 `jk` programs are deliberately not evaluated. A CNL2 key must be
 a literal 32-character hexadecimal return value; this keeps website code out
 of the privileged extension and Python helper contexts.
 
-Intercepted Fetch and XMLHttpRequest calls preserve abort and timeout behavior.
+Intercepted Fetch and XMLHttpRequest calls preserve abort behavior and apply a
+ten-second absolute extension deadline. At most 32 bridge requests may be active;
+request bodies, handshake tokens, source URLs, and listener responses are read or
+forwarded only within fixed byte limits.
 Intercepted forms include the clicked submit button and emit
 `omajdownload:success` or `omajdownload:error` on the form; a named iframe target
 also receives the listener response through `srcdoc`.

@@ -10,27 +10,32 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install QML validation tools
-        run: sudo apt-get update && sudo apt-get install --yes qt6-declarative-dev-tools
-      - run: python -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
-      - run: REQUIRE_QML_TOOLS=1 REQUIRE_BROWSER_TESTS=1 ./scripts/check.sh
+      - name: Select immutable Arch package snapshot
+        run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
+      - run: pacman -Syu --noconfirm git nodejs python python-pip qt6-declarative shellcheck
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python -m venv /tmp/omajdownload-ci
+      - run: /tmp/omajdownload-ci/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
+      - run: PYTHON_BIN=/tmp/omajdownload-ci/bin/python REQUIRE_QML_TOOLS=1 REQUIRE_BROWSER_TESTS=1 ./scripts/check.sh
 
   qml-semantic:
-    runs-on: ubuntu-latest
-    container: archlinux:base
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     steps:
+      - name: Select immutable Arch package snapshot
+        run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - name: Install current Omarchy QML toolchain
         run: pacman -Syu --noconfirm git qt6-declarative quickshell weston
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Fetch matching Omarchy Quattro types
-        run: git clone --depth 1 --branch quattro https://github.com/basecamp/omarchy.git /tmp/omarchy
+        run: |
+          git init /tmp/omarchy
+          git -C /tmp/omarchy remote add origin https://github.com/basecamp/omarchy.git
+          git -C /tmp/omarchy fetch --depth 1 origin d3d23fdddef846ebb98b52122a6ece66211c0daf
+          git -C /tmp/omarchy checkout --detach FETCH_HEAD
       - name: Lint and load plugin against Omarchy and Quickshell modules
         env:
           OMARCHY_SHELL_SOURCE: /tmp/omarchy/shell
@@ -50,20 +55,22 @@ jobs:
           WAYLAND_DISPLAY=wayland-omajdownload QT_QPA_PLATFORM=wayland ./scripts/qml-runtime-smoke.sh
 
   browser-e2e:
-    runs-on: ubuntu-latest
-    container: archlinux:base
+    runs-on: ubuntu-24.04
+    container: archlinux:base@sha256:82b1b08faae9d61e3e7e13d562f4d09114d939105b0d59ff34140f3bd418593a
     steps:
+      - name: Select immutable Arch package snapshot
+        run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - name: Install stable browsers and WebDriver
         run: >-
           pacman -Syu --noconfirm
           chromium firefox geckodriver python python-pip
           xorg-server-xvfb openssl zip unzip
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install locked helper dependencies
         run: |
           python -m venv --system-site-packages /tmp/omajdownload-e2e
           /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
-          /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check selenium==4.35.0
+          /tmp/omajdownload-e2e/bin/pip install --disable-pip-version-check --require-hashes -r tests/requirements.lock
       - name: Build browser packages
         run: ./scripts/build-extension.sh
       - name: Exercise Chromium and Firefox extensions over HTTPS

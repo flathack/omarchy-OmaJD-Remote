@@ -24,8 +24,8 @@ def load_script(name):
 
 
 verify_environment = load_script("verify_environment.py")
-prune_environments = load_script("prune_environments.py")
 verify_release = load_script("verify_release.py")
+secure_install = load_script("secure_install.py")
 
 
 class EnvironmentVerificationTests(unittest.TestCase):
@@ -40,117 +40,75 @@ class EnvironmentVerificationTests(unittest.TestCase):
         self.assertTrue(all("expected" in error for error in errors))
 
 
-class EnvironmentPruningTests(unittest.TestCase):
-    def test_pruning_keeps_active_newest_rollback_and_symlinks(self):
+class InstallerTransactionTests(unittest.TestCase):
+    def test_shell_entrypoint_delegates_to_descriptor_safe_installer(self):
+        source = (PROJECT / "install.sh").read_text(encoding="utf-8")
+        helper = (PROJECT / "scripts" / "secure_install.py").read_text(encoding="utf-8")
+        self.assertIn("scripts/secure_install.py", source)
+        self.assertIn("O_NOFOLLOW", helper)
+        self.assertIn("rename_exchange", helper)
+        self.assertIn("OUTPUT_TOTAL_LIMIT", helper)
+        self.assertIn("--development", (PROJECT / "scripts" / "setup-dev.sh").read_text(encoding="utf-8"))
+
+    def test_data_root_symlink_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            active = root / (".venv-" + "a" * 64)
-            newest = root / (".venv-" + "b" * 64)
-            oldest = root / (".venv-" + "c" * 64)
-            for index, path in enumerate((oldest, newest, active), start=1):
-                path.mkdir()
-                os.utime(path, (index, index))
-            outside = root / "outside"
-            outside.mkdir()
-            link = root / (".venv-" + "d" * 64)
-            link.symlink_to(outside, target_is_directory=True)
-            interrupted = root / (".venv-" + "e" * 64 + ".new.1234")
-            interrupted.mkdir()
+            target = root / "target"
+            target.mkdir()
+            link = root / "data-root"
+            link.symlink_to(target, target_is_directory=True)
+            with self.assertRaises(OSError):
+                secure_install.open_directory(link, create=True, private=True)
 
-            removed = prune_environments.prune(root, active, keep_rollbacks=1)
-            self.assertEqual(removed, [oldest])
-            self.assertTrue(active.is_dir())
-            self.assertTrue(newest.is_dir())
-            self.assertTrue(link.is_symlink())
-            self.assertTrue(outside.is_dir())
-            self.assertTrue(interrupted.is_dir())
-
-    def test_installed_environment_names_are_owned(self):
-        name = ".venv-" + "a" * 64 + ".installed.123456-42"
-        self.assertIsNotNone(prune_environments.OWNED.fullmatch(name))
-
-
-class InstallerTransactionTests(unittest.TestCase):
-    def test_installer_does_not_move_the_live_environment_before_commit(self):
-        source = (PROJECT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn(".installed.$backup_suffix", source)
-        self.assertIn('mv "$staging_dir" "$environment_dir"', source)
-        self.assertIn('mv -Tf "$next_link" "$venv_dir"', source)
-        self.assertNotIn('mv "$environment_dir" "$environment_dir.broken', source)
-
-    def run_failed_install(self, root, active_kind, failure):
-        data_root = root / "share" / "omajdownload"
-        data_root.mkdir(parents=True)
+    def run_install(self, data_root, active_kind):
+        data_root.mkdir(mode=0o700)
+        old_name = ".venv-" + "a" * 64 + ".installed.1-1-deadbeef"
+        old = data_root / old_name
+        old.mkdir()
         active = data_root / "venv"
         if active_kind == "symlink":
-            previous = data_root / "previous-environment"
-            (previous / "bin").mkdir(parents=True)
-            (previous / "bin" / "python").write_text("working", encoding="utf-8")
-            active.symlink_to(previous.name, target_is_directory=True)
+            active.symlink_to(old_name, target_is_directory=True)
         else:
-            (active / "bin").mkdir(parents=True)
+            active.mkdir()
+            (active / "bin").mkdir()
             (active / "bin" / "python").write_text("working", encoding="utf-8")
-
-        fake_bin = root / "bin"
-        fake_bin.mkdir()
-        fake_python = fake_bin / "python"
-        fake_python.write_text("""#!/usr/bin/env bash
-if [[ "$1" == "-m" && "$2" == "venv" ]]; then
-  mkdir -p "$3/bin"
-  printf '#!/usr/bin/env bash\\nexit 0\\n' > "$3/bin/pip"
-  printf '#!/usr/bin/env bash\\nexit 0\\n' > "$3/bin/python"
-  chmod +x "$3/bin/pip" "$3/bin/python"
-fi
-exit 0
-""", encoding="utf-8")
-        fake_mv = fake_bin / "mv"
-        fake_mv.write_text("""#!/usr/bin/env bash
-if [[ "${FAIL_MODE:-}" == "commit" && "${1:-}" == "-Tf" ]]; then exit 77; fi
-exec /usr/bin/mv "$@"
-""", encoding="utf-8")
-        fake_ln = fake_bin / "ln"
-        fake_ln.write_text("""#!/usr/bin/env bash
-if [[ "${FAIL_MODE:-}" == "link" ]]; then exit 78; fi
-exec /usr/bin/ln "$@"
-""", encoding="utf-8")
-        fake_secret = fake_bin / "secret-tool"
-        fake_secret.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-        for executable in (fake_python, fake_mv, fake_ln, fake_secret):
-            executable.chmod(0o755)
-
-        result = subprocess.run(
-            ["/usr/bin/bash", str(PROJECT / "install.sh")],
-            cwd=PROJECT,
-            env={
-                **os.environ,
-                "XDG_DATA_HOME": str(root / "share"),
-                "PATH": f"{fake_bin}:/usr/bin",
-                "FAIL_MODE": failure,
-            },
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((active / "bin" / "python").is_file())
+            old.rmdir()
+        with mock.patch.object(secure_install.BoundedRunner, "run"):
+            secure_install.install(PROJECT, data_root)
         return active
 
-    def test_link_creation_failure_preserves_active_symlink(self):
+    def test_atomic_publication_replaces_an_owned_symlink(self):
         with TemporaryDirectory() as directory:
-            active = self.run_failed_install(Path(directory), "symlink", "link")
+            root = Path(directory)
+            active = self.run_install(root / "omajdownload", "symlink")
             self.assertTrue(active.is_symlink())
-            self.assertEqual(active.readlink(), Path("previous-environment"))
+            self.assertRegex(active.readlink().name, secure_install.OWNED_ENVIRONMENT)
 
-    def test_final_symlink_move_failure_preserves_active_symlink(self):
+    def test_legacy_directory_is_atomically_exchanged(self):
         with TemporaryDirectory() as directory:
-            active = self.run_failed_install(Path(directory), "symlink", "commit")
+            root = Path(directory)
+            data_root = root / "omajdownload"
+            active = self.run_install(data_root, "legacy")
             self.assertTrue(active.is_symlink())
-            self.assertEqual(active.readlink(), Path("previous-environment"))
+            legacy = list(data_root.glob("venv.legacy.*"))
+            self.assertEqual(len(legacy), 1)
+            self.assertEqual((legacy[0] / "bin" / "python").read_text(encoding="utf-8"), "working")
 
-    def test_final_symlink_move_failure_restores_legacy_environment(self):
-        with TemporaryDirectory() as directory:
-            active = self.run_failed_install(Path(directory), "legacy", "commit")
-            self.assertTrue(active.is_dir())
-            self.assertFalse(active.is_symlink())
+
+class WorkflowPinTests(unittest.TestCase):
+    def test_ci_and_release_inputs_are_immutable(self):
+        workflows = "\n".join(
+            (PROJECT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            for name in ("ci.yml", "release.yml")
+        )
+        self.assertNotIn("ubuntu-latest", workflows)
+        self.assertNotIn("actions/checkout@v", workflows)
+        self.assertNotIn("actions/setup-python@", workflows)
+        self.assertNotIn("archlinux:base\n", workflows)
+        self.assertNotIn("--branch quattro", workflows)
+        self.assertIn("archive.archlinux.org/repos/2026/09/01", workflows)
+        self.assertIn("d3d23fdddef846ebb98b52122a6ece66211c0daf", workflows)
+        self.assertIn("tests/requirements.lock", workflows)
 
 
 class BrowserPackagingTests(unittest.TestCase):
@@ -204,10 +162,10 @@ class BrowserPackagingTests(unittest.TestCase):
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_release_versions_and_changelog_match(self):
-        self.assertEqual(verify_release.verify(), "0.6.0")
+        self.assertEqual(verify_release.verify(), "0.6.1")
 
     def test_release_tag_must_match_version(self):
-        self.assertEqual(verify_release.verify("v0.6.0"), "0.6.0")
+        self.assertEqual(verify_release.verify("v0.6.1"), "0.6.1")
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             verify_release.verify("v9.9.9")
 

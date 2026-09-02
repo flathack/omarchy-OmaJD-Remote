@@ -1,4 +1,5 @@
 import unittest
+import re
 from pathlib import Path
 
 
@@ -42,7 +43,7 @@ class UiContractTests(unittest.TestCase):
 
     def test_ci_requires_qml_tools(self):
         workflow = (PROJECT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("qt6-declarative-dev-tools", workflow)
+        self.assertIn("qt6-declarative", workflow)
         self.assertIn("REQUIRE_QML_TOOLS=1", workflow)
         self.assertIn("REQUIRE_BROWSER_TESTS=1", workflow)
 
@@ -64,6 +65,14 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("Math.min(60000", self.service)
         self.assertIn("Retry JDownloader helper", self.widget)
         self.assertIn("root.cnlListening = false", self.service)
+        self.assertIn("id: helperResponseWatchdog", self.service)
+        self.assertIn("id: installerWatchdog", self.service)
+        self.assertIn("installer.signal(15)", self.service)
+
+    def test_every_text_node_forces_plain_text(self):
+        text_blocks = re.findall(r"(?<![A-Za-z])Text\s*\{([^{}]*)", self.widget)
+        self.assertTrue(text_blocks)
+        self.assertTrue(all("textFormat: Text.PlainText" in block for block in text_blocks))
 
     def test_manual_add_links_uncertainty_is_explicit(self):
         self.assertIn('command: retrying ? "retry_add_links" : "add_links"', self.service)

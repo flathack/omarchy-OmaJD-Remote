@@ -106,7 +106,7 @@ function pageHarness({ failRequests = false } = {}) {
     window, document, URL, URLSearchParams, Request, Response,
     FormData: MockFormData, HTMLFormElement: MockForm, HTMLScriptElement: MockScript,
     XMLHttpRequest: MockXHR, Event: MockEvent, ProgressEvent: MockProgressEvent, CustomEvent: MockCustomEvent,
-    AbortController, DOMException, Error,
+    AbortController, DOMException, Error, TextEncoder,
     Promise, Map, WeakSet, String, Date, Math, TypeError,
     setTimeout(callback, delay) { timerDelays.push(delay); return setTimeout(callback, delay); },
     clearTimeout, queueMicrotask
@@ -260,19 +260,24 @@ test("service worker authenticates provenance and supports GET probes", async ()
   const calls = [];
   let targetStatus = 200;
   let targetFailure = false;
+  let targetBody = "";
   const chrome = { runtime: { onMessage: { addListener(callback) { listener = callback; } } } };
   const fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
-    if (String(url).endsWith("/omajdownload/extension-token")) return new Response("token-123", { status: 200 });
+    if (String(url).endsWith("/omajdownload/extension-token")) return new Response("0123456789abcdef0123456789abcdef", { status: 200 });
     if (String(url).endsWith("/flash/")) return new Response("JDownloader\r\n", { status: 200 });
     if (targetFailure) throw new Error("listener stopped");
-    return new Response(targetStatus === 200 ? "success\r\n" : "inbox full", { status: targetStatus });
+    return new Response(targetBody || (targetStatus === 200 ? "success\r\n" : "inbox full"), { status: targetStatus });
   };
-  const context = vm.createContext({ chrome, fetch, URL, TextEncoder, String, Error, Response, AbortController, Map });
+  const context = vm.createContext({
+    chrome, fetch, URL, TextEncoder, TextDecoder, String, Error, Response, AbortController, Map,
+    setTimeout, clearTimeout
+  });
   vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/service-worker.js"), "utf8"), context);
 
+  let requestSequence = 0;
   const invoke = (message) => new Promise(resolve => {
-    assert.equal(listener(message, { url: "https://source.example/page" }, resolve), true);
+    assert.equal(listener({ requestId: `request-${++requestSequence}`, ...message }, { url: "https://source.example/page" }, resolve), true);
   });
   const post = await invoke({
     type: "omajdownload-cnl", method: "POST",
@@ -280,7 +285,7 @@ test("service worker authenticates provenance and supports GET probes", async ()
   });
   assert.equal(post.ok, true);
   const forwarded = calls.find(call => call.options.method === "POST");
-  assert.equal(forwarded.options.headers["X-OmaJDownLoad-Token"], "token-123");
+  assert.equal(forwarded.options.headers["X-OmaJDownLoad-Token"], "0123456789abcdef0123456789abcdef");
   assert.equal(forwarded.options.headers["X-OmaJDownLoad-Origin"], "https://source.example/page");
   assert.equal(calls.filter(call => call.url.endsWith("/flash/add")).length, 1);
 
@@ -297,7 +302,7 @@ test("service worker authenticates provenance and supports GET probes", async ()
 
   let oversize;
   assert.equal(listener({
-    type: "omajdownload-cnl", method: "POST",
+    type: "omajdownload-cnl", requestId: "oversize", method: "POST",
     url: "http://127.0.0.1:9666/flash/add", body: "x".repeat(1024 * 1024 + 1)
   }, { url: "https://source.example/page" }, value => { oversize = value; }), false);
   assert.equal(oversize.status, 413);
@@ -311,6 +316,14 @@ test("service worker authenticates provenance and supports GET probes", async ()
   assert.equal(full.status, 507);
 
   targetStatus = 200;
+  targetBody = "x".repeat(64 * 1024 + 1);
+  const oversizedResponse = await invoke({
+    type: "omajdownload-cnl", method: "POST", url: "http://127.0.0.1:9666/flash/add", body: "urls=large"
+  });
+  assert.equal(oversizedResponse.ok, false);
+  assert.match(oversizedResponse.message, /too large/);
+
+  targetBody = "";
   targetFailure = true;
   const stopped = await invoke({
     type: "omajdownload-cnl", method: "POST",
@@ -321,19 +334,59 @@ test("service worker authenticates provenance and supports GET probes", async ()
   assert.match(stopped.message, /listener stopped/);
 });
 
+test("service worker caps concurrent request controllers", async () => {
+  let listener;
+  const chrome = { runtime: { onMessage: { addListener(callback) { listener = callback; } } } };
+  const fetch = (url, options = {}) => {
+    if (String(url).endsWith("/omajdownload/extension-token"))
+      return Promise.resolve(new Response("0123456789abcdef0123456789abcdef", { status: 200 }));
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  };
+  const context = vm.createContext({
+    chrome, fetch, URL, TextEncoder, TextDecoder, String, Error, Response, AbortController, Map,
+    DOMException, setTimeout, clearTimeout
+  });
+  vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/service-worker.js"), "utf8"), context);
+  const sender = { tab: { id: 1 }, frameId: 0, documentId: "capacity", url: "https://source.example" };
+  const pending = [];
+  for (let index = 0; index < 32; index++) {
+    pending.push(new Promise(resolve => {
+      assert.equal(listener({
+        type: "omajdownload-cnl", requestId: `request-${index}`, method: "POST",
+        url: "http://127.0.0.1:9666/flash/add", body: "urls=one"
+      }, sender, resolve), true);
+    }));
+  }
+  let rejected;
+  assert.equal(listener({
+    type: "omajdownload-cnl", requestId: "request-overflow", method: "POST",
+    url: "http://127.0.0.1:9666/flash/add", body: "urls=overflow"
+  }, sender, value => { rejected = value; }), false);
+  assert.equal(rejected.status, 429);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  for (let index = 0; index < 32; index++)
+    listener({ type: "omajdownload-cnl-cancel", requestId: `request-${index}` }, sender, () => {});
+  await Promise.all(pending);
+});
+
 test("service worker isolates equal request IDs across senders", async () => {
   let listener;
   const targetRequests = [];
   const chrome = { runtime: { onMessage: { addListener(callback) { listener = callback; } } } };
   const fetch = async (url, options = {}) => {
-    if (String(url).endsWith("/omajdownload/extension-token")) return new Response("token-123", { status: 200 });
+    if (String(url).endsWith("/omajdownload/extension-token")) return new Response("0123456789abcdef0123456789abcdef", { status: 200 });
     return new Promise((resolve, reject) => {
       const pending = { options, resolve };
       targetRequests.push(pending);
       options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     });
   };
-  const context = vm.createContext({ chrome, fetch, URL, TextEncoder, String, Error, Response, AbortController, Map });
+  const context = vm.createContext({
+    chrome, fetch, URL, TextEncoder, TextDecoder, String, Error, Response, AbortController, Map,
+    setTimeout, clearTimeout
+  });
   vm.runInContext(fs.readFileSync(path.join(project, "browser-extension/service-worker.js"), "utf8"), context);
   const firstSender = { tab: { id: 1 }, frameId: 0, documentId: "doc-a", url: "https://a.example" };
   const secondSender = { tab: { id: 2 }, frameId: 0, documentId: "doc-b", url: "https://b.example" };

@@ -326,6 +326,7 @@ Panel {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         visible: root.backend && (root.backend.lastError !== "" || root.backend.actionStatus !== "")
                         width: parent.width
                         text: root.backend && root.backend.actionStatus !== "" ? root.backend.actionStatus : (root.backend ? root.backend.lastError : "")
@@ -345,6 +346,7 @@ Panel {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         visible: root.backend && root.backend.helperRetryStatus !== ""
                         width: parent.width
                         text: root.backend ? root.backend.helperRetryStatus : ""
@@ -355,6 +357,7 @@ Panel {
                     }
 
                     Text {
+                        textFormat: Text.PlainText
                         visible: root.keyboardHint !== ""
                         width: parent.width
                         text: "KEYBOARD · " + root.keyboardHint
@@ -371,6 +374,7 @@ Panel {
                         spacing: Style.space(10)
 
                         Text {
+                            textFormat: Text.PlainText
                             width: parent.width
                             text: "OmaJD-Remote uses an isolated Python helper for MyJDownloader's encrypted API. Install it once in your user profile."
                             color: root.dim
@@ -398,6 +402,7 @@ Panel {
                         spacing: Style.space(10)
 
                         Text {
+                            textFormat: Text.PlainText
                             width: parent.width
                             text: "Connect your MyJDownloader account. The password is stored in the desktop keyring, never in shell.json."
                             color: root.dim
@@ -407,6 +412,7 @@ Panel {
                         }
 
                         Text {
+                            textFormat: Text.PlainText
                             text: "Email address"
                             color: root.dim
                             font.family: root.fontFamily
@@ -427,6 +433,7 @@ Panel {
                         }
 
                         Text {
+                            textFormat: Text.PlainText
                             text: "Password"
                             color: root.dim
                             font.family: root.fontFamily
@@ -559,6 +566,7 @@ Panel {
                                 }
 
                                 Text {
+                                    textFormat: Text.PlainText
                                     width: Math.max(0, parent.width - Style.space(14))
                                     text: root.backend && root.backend.cnlListening ? "Ready on this computer · port " + root.backend.cnlPort : "Listener unavailable" + (root.backend && root.backend.cnlError !== "" ? " · " + root.backend.cnlError : "")
                                     color: root.dim
@@ -569,6 +577,7 @@ Panel {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 visible: root.backend && root.backend.cnlInbox.length === 0
                                 width: parent.width
                                 text: "Click'n'Load buttons will appear here before anything is sent to JDownloader."
@@ -724,9 +733,10 @@ Panel {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 visible: root.backend && (root.backend.downloadError !== "" || root.backend.downloadsTruncated)
                                 width: parent.width
-                                text: root.backend && root.backend.downloadError !== "" ? "Download list refresh failed · " + root.backend.downloadError : "Showing the first 6000 download packages"
+                                text: root.backend && root.backend.downloadError !== "" ? "Download list refresh failed · " + root.backend.downloadError : "Showing the first 1000 download packages"
                                 color: root.backend && root.backend.downloadError !== "" ? root.urgent : root.dim
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.caption
@@ -764,9 +774,10 @@ Panel {
                             }
 
                             Text {
+                                textFormat: Text.PlainText
                                 visible: root.backend && (root.backend.grabberError !== "" || root.backend.grabberTruncated)
                                 width: parent.width
-                                text: root.backend && root.backend.grabberError !== "" ? "LinkGrabber refresh failed · " + root.backend.grabberError : "Showing the first 6000 LinkGrabber packages"
+                                text: root.backend && root.backend.grabberError !== "" ? "LinkGrabber refresh failed · " + root.backend.grabberError : "Showing the first 1000 LinkGrabber packages"
                                 color: root.backend && root.backend.grabberError !== "" ? root.urgent : root.dim
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.caption
@@ -952,6 +963,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                        textFormat: Text.PlainText
                         visible: !packageRow.editingName
                         width: parent.width
                         text: String(packageRow.item.name || "Unnamed package")
@@ -990,6 +1002,7 @@ Panel {
                         }
                     }
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: packageRow.grabber ? (String(packageRow.item.size_text || "") + (packageRow.item.child_count ? " · " + packageRow.item.child_count + " links" : "")) : (String(packageRow.item.progress || 0) + "% · " + String(packageRow.item.speed_text || "0 B/s"))
                         color: root.dim
@@ -1126,6 +1139,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: cnlRow.item.origin_verified === true ? String(cnlRow.item.origin || "Verified browser page") : "Unverified Click'n'Load request"
                         color: root.foreground
@@ -1135,6 +1149,7 @@ Panel {
                         elide: Text.ElideMiddle
                     }
                     Text {
+                        textFormat: Text.PlainText
                         width: parent.width
                         text: "Claims " + String(cnlRow.item.source || "unknown source") + " · " + String(cnlRow.item.link_count || 0) + (Number(cnlRow.item.link_count || 0) === 1 ? " link" : " links") + (cnlRow.item.encrypted === true ? " · CNL2" : " · CNL") + (cnlRow.item.received_at ? " · " + cnlRow.item.received_at : "")
                         color: root.dim
@@ -1143,6 +1158,7 @@ Panel {
                         elide: Text.ElideRight
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: cnlRow.hostSummary !== ""
                         width: parent.width
                         text: "Destinations · " + cnlRow.hostSummary
@@ -1152,6 +1168,7 @@ Panel {
                         elide: Text.ElideMiddle
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: cnlRow.linksExpanded
                         width: parent.width
                         text: root.backend && root.backend.cnlDetailsId === String(cnlRow.item.id || "") ? root.backend.cnlDetailsUrls.join("\n") + (root.backend.cnlDetailsHiddenCount > 0 ? "\n… " + root.backend.cnlDetailsHiddenCount + " additional links not shown" : "") : "Loading URL preview…"
@@ -1161,6 +1178,7 @@ Panel {
                         wrapMode: Text.WrapAnywhere
                     }
                     Text {
+                        textFormat: Text.PlainText
                         visible: cnlRow.uncertain || cnlRow.submitting
                         width: parent.width
                         text: cnlRow.uncertain ? "Previous submission may already have reached JDownloader" : "Submitting to JDownloader…"
@@ -1290,6 +1308,7 @@ Panel {
             spacing: Style.space(1)
 
             Text {
+                textFormat: Text.PlainText
                 id: connectionState
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: connectionSwitch.stateLabel

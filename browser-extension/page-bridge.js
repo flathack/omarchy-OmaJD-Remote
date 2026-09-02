@@ -1,6 +1,8 @@
 (() => {
   const REQUEST_MARKER = "omajdownload-cnl-request-v1";
   const RESPONSE_MARKER = "omajdownload-cnl-response-v1";
+  const MAX_PENDING_REQUESTS = 32;
+  const REQUEST_BODY_BYTE_LIMIT = 1024 * 1024;
   const pending = new Map();
   let sequence = 0;
 
@@ -43,6 +45,11 @@
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}-${++sequence}`;
     if (signal && signal.aborted) return Promise.reject(abortError());
+    if (pending.size >= MAX_PENDING_REQUESTS)
+      return Promise.reject(new TypeError("Too many concurrent Click'n'Load requests"));
+    const encodedBody = route.method === "POST" ? encodeBody(body) : "";
+    if (new TextEncoder().encode(encodedBody).byteLength > REQUEST_BODY_BYTE_LIMIT)
+      return Promise.reject(new TypeError("Click'n'Load request is too large"));
     return new Promise((resolve, reject) => {
       let timeout;
       const cleanup = () => {
@@ -71,7 +78,7 @@
         url: route.url,
         method: route.method,
         probe: route.probe,
-        body: route.method === "POST" ? encodeBody(body) : ""
+        body: encodedBody
       }, "*");
     });
   }
