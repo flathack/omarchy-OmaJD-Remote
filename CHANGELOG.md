@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.3] - 2026-09-02
 
 - Bound the oversized-request drain and IPC line read in wall-clock time so
   a trickling producer cannot stall the helper
@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
   and drop the leaked descriptor in setup_development
 - Move the Add Links trim hint out of the clipped editor viewport, disable
   removal arming while busy, and align the keyboard-guard comment
+
+## [Unreleased]
 
 ## [0.6.2] - 2026-09-02
 

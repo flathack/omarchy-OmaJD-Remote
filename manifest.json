@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.flathack.omajd-remote",
   "name": "omarchy-OmaJD-Remote",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "author": "flathack",
   "description": "Control remote MyJDownloader devices and receive Click'n'Load from the Omarchy bar",
   "kinds": [
