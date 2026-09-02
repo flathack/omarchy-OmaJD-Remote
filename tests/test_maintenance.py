@@ -61,6 +61,9 @@ class InstallerTransactionTests(unittest.TestCase):
                 secure_install.open_directory(link, create=True, private=True)
 
     def run_install(self, data_root, active_kind):
+        plugin_dir = data_root.parent / "plugin-source"
+        plugin_dir.mkdir()
+        shutil.copy2(PROJECT / "requirements.lock", plugin_dir / "requirements.lock")
         data_root.mkdir(mode=0o700)
         old_name = ".venv-" + "a" * 64 + ".installed.1-1-deadbeef"
         old = data_root / old_name
@@ -74,7 +77,7 @@ class InstallerTransactionTests(unittest.TestCase):
             (active / "bin" / "python").write_text("working", encoding="utf-8")
             old.rmdir()
         with mock.patch.object(secure_install.BoundedRunner, "run"):
-            secure_install.install(PROJECT, data_root)
+            secure_install.install(plugin_dir, data_root)
         return active
 
     def test_atomic_publication_replaces_an_owned_symlink(self):

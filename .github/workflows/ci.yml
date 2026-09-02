@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Select immutable Arch package snapshot
         run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
-      - run: pacman -Syu --noconfirm diffutils git nodejs python python-pip qt6-declarative shellcheck
+      - run: pacman -Syu --noconfirm diffutils git nodejs python python-pip qt6-declarative shellcheck zip
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python -m venv /tmp/omajdownload-ci
       - run: /tmp/omajdownload-ci/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
