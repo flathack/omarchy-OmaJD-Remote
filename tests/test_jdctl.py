@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -159,6 +160,53 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, "deadline"):
             with jdctl.absolute_deadline(0.02, "test request"):
                 time.sleep(0.2)
+
+    def test_nested_absolute_deadline_uses_earliest_deadline(self):
+        # Outer deadline (0.05s) is earlier than the inner one (0.2s);
+        # the outer timer must fire even though the inner "request" is still
+        # supposed to have 0.2 seconds left.
+        with self.assertRaisesRegex(TimeoutError, "outer snapshot"):
+            with jdctl.absolute_deadline(0.05, "outer snapshot"):
+                with jdctl.absolute_deadline(0.2, "inner request"):
+                    time.sleep(0.3)
+
+    def test_nested_absolute_deadline_restores_expired_outer_timer(self):
+        # After the outer deadline has elapsed during an inner wait, exiting
+        # the outer with-block must still surface the outer TimeoutError on
+        # the next signal-check (i.e. the SIGALRM was not lost).
+        with self.assertRaisesRegex(TimeoutError, "outer snapshot"):
+            with jdctl.absolute_deadline(0.08, "outer snapshot"):
+                with jdctl.absolute_deadline(1.0, "inner request"):
+                    time.sleep(0.15)
+            # Outer finally ran; sleep to let the next SIGALRM delivery fire.
+            time.sleep(0.05)
+
+    def test_absolute_deadline_restores_previous_handler_and_timer(self):
+        original_handler = signal.getsignal(signal.SIGALRM)
+        original_timer = signal.setitimer(signal.ITIMER_REAL, 0.4)
+        try:
+            try:
+                with jdctl.absolute_deadline(0.05, "outer snapshot"):
+                    inner_timer = signal.getitimer(signal.ITIMER_REAL)
+                    # The pre-existing outer timer (~0.4s) is still in effect,
+                    # so the inner timer must NOT be reduced to the requested
+                    # 0.05s. Allow scheduler slop so we only flag a real
+                    # regression where the inner deadline overwrites the
+                    # outer one.
+                    self.assertGreater(inner_timer[0], 0.04)
+                    self.assertLessEqual(inner_timer[0], 0.4)
+            finally:
+                restored_timer = signal.getitimer(signal.ITIMER_REAL)
+                restored_handler = signal.getsignal(signal.SIGALRM)
+                # Outer timer should be restored to ~ the elapsed-out portion
+                # of its original 0.4s budget, with the original handler.
+                self.assertLessEqual(restored_timer[0], 0.4)
+                self.assertEqual(restored_handler, original_handler)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, original_handler)
+            if original_timer[0]:
+                signal.setitimer(signal.ITIMER_REAL, *original_timer)
 
     def test_request_schema_rejects_unbounded_id_arrays(self):
         request_data = {

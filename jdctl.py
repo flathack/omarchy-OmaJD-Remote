@@ -136,27 +136,74 @@ def install_http_bounds() -> None:
     requests.sessions.Session.request = bounded_request
 
 
+_ACTIVE_DEADLINE: contextvars.ContextVar[tuple[float, str] | None] = contextvars.ContextVar(
+    "active_deadline", default=None
+)
+
+
 @contextlib.contextmanager
 def absolute_deadline(seconds: float, operation: str) -> Any:
-    """Interrupt a synchronous remote call at an absolute wall-clock deadline."""
+    """Interrupt a synchronous remote call at an absolute wall-clock deadline.
+
+    Nested deadlines honor the earliest absolute deadline: an outer timer that
+    would expire sooner than the requested inner deadline is preserved instead
+    of being replaced. On exit, the previously installed timer and handler are
+    restored so that an outer deadline that already elapsed while we were
+    running still fires (with zero remaining time, which causes an immediate
+    delivery on the next signal-check).
+    """
     if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
         yield
         return
 
-    def expired(_signum: int, _frame: Any) -> None:
-        raise TimeoutError(f"{operation} exceeded its {seconds:g}-second deadline")
-
     previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
     started = time.monotonic()
+    outer_remaining = previous_timer[0]
+    if outer_remaining and outer_remaining <= seconds:
+        # The currently-running timer expires sooner than the requested inner
+        # deadline. Honor it and inherit its operation label so the
+        # TimeoutError reflects the trigger that actually fired.
+        active_seconds = outer_remaining
+        parent = _ACTIVE_DEADLINE.get()
+        active_operation = parent[1] if parent is not None else operation
+    else:
+        active_seconds = seconds
+        active_operation = operation
+    # Round sub-millisecond values up to keep setitimer(0) from disabling the
+    # timer entirely (POSIX treats a zero interval as "no timer").
+    if 0 < active_seconds < 1e-3:
+        active_seconds = 1e-3
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise TimeoutError(f"{active_operation} exceeded its {active_seconds:g}-second deadline")
+
     signal.signal(signal.SIGALRM, expired)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.setitimer(signal.ITIMER_REAL, active_seconds)
+    token = _ACTIVE_DEADLINE.set((active_seconds, active_operation))
     try:
         yield
     finally:
         elapsed = time.monotonic() - started
-        previous_remaining = max(0.0, previous_timer[0] - elapsed) if previous_timer[0] else 0.0
-        signal.setitimer(signal.ITIMER_REAL, previous_remaining, previous_timer[1])
+        # The outer timer (if any) has been advancing during our run. Replace
+        # it with the *original* remaining time minus what already elapsed so
+        # that an outer deadline that has now lapsed still surfaces
+        # (remaining = 0).
+        if outer_remaining:
+            previous_remaining = outer_remaining - elapsed
+        else:
+            previous_remaining = 0.0
+        # Cancel the timer we installed before restoring. setitimer(0) clears
+        # any pending SIGALRM delivery POSIX might have queued while we ran.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if previous_remaining > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_remaining, previous_timer[1])
+        elif previous_remaining < 0:
+            # Outer deadline elapsed while we were running. Re-arm with a tiny
+            # interval so the next signal-check delivers the pending SIGALRM.
+            signal.setitimer(signal.ITIMER_REAL, 1e-3, previous_timer[1])
         signal.signal(signal.SIGALRM, previous_handler)
+        _ACTIVE_DEADLINE.reset(token)
 
 
 @contextlib.contextmanager

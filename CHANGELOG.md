@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Preserve outer absolute deadlines when nested deadlines are longer, and
+  restore any outer's already-elapsed deadline on exit
+
 ## [0.6.1] - 2026-09-02
 
 - Bound the loopback bridge, browser companion, helper IPC, remote response
