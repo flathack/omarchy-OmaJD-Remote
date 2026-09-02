@@ -18,6 +18,9 @@ All notable changes to this project will be documented in this file.
   pair keeps replacement XHRs from being touched by their predecessors
 - Treat non-finite remote numerics (``Infinity``, ``-Infinity``, ``NaN``)
   as 0 so a single bad snapshot value cannot abort the helper
+- Guard the ``r`` (refresh) keyboard shortcut against a still-starting
+  service backend so a QML TypeError cannot be raised while the
+  helper is unavailable
 
 ## [0.6.1] - 2026-09-02
 

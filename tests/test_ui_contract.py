@@ -59,6 +59,25 @@ class UiContractTests(unittest.TestCase):
     def test_linkgrabber_rename_is_keyboard_accessible(self):
         self.assertIn('Accessible.name: "Rename LinkGrabber package"', self.widget)
         self.assertIn("onAccepted: packageRow.finishRename(true)", self.widget)
+
+    def test_refresh_shortcut_is_guardable_when_service_backend_is_unavailable(self):
+        # Pressing 'r' before the service backend has resolved (e.g. while
+        # the helper is still starting up) used to raise a QML TypeError.
+        # The keyboard handler must early-return when root.backend is null
+        # instead of touching a method on it.
+        match = re.search(
+            r"onTextKey:\s*function\s*\(\s*t\s*\)\s*\{[^}]*?if\s*\(\s*!?root\.backend",
+            self.widget,
+            re.DOTALL,
+        )
+        # Match either an explicit null check or an early-return before any
+        # root.backend.* call is made.
+        self.assertIsNotNone(match, "refresh shortcut must guard root.backend before use")
+        self.assertIn(
+            'if (t === "r" || t === "R")',
+            self.widget[match.start():],
+            "the null guard must apply before the 'r' / 'R' branch",
+        )
         self.assertIn("Keys.onEscapePressed: packageRow.finishRename(false)", self.widget)
         self.assertIn("function renameGrabberPackage(uuid, name)", self.service)
         self.assertIn("signal renameFinished(string requestId, bool ok)", self.service)

@@ -278,6 +278,14 @@ Panel {
                 root.moveTabFocus(direction);
             }
             onTextKey: function (t) {
+                if (!root.backend) {
+                    // Helper is still starting up or has been torn down;
+                    // a press would otherwise raise a QML TypeError. The
+                    // 'a' branch can still jump focus to the link editor
+                    // even when no backend is available, so leave that one
+                    // unguarded.
+                    return;
+                }
                 if (t === "r" || t === "R")
                     root.backend.refresh();
                 else if ((t === "s" || t === "S") && root.remoteControlsEnabled)
