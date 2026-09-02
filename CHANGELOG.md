@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file.
   ``InvalidStateError``, a second ``open()`` aborts the in-flight
   request and cancels the stale callback, and a token/generation
   pair keeps replacement XHRs from being touched by their predecessors
+- Treat non-finite remote numerics (``Infinity``, ``-Infinity``, ``NaN``)
+  as 0 so a single bad snapshot value cannot abort the helper
 
 ## [0.6.1] - 2026-09-02
 

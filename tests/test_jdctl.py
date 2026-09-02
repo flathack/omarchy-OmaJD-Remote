@@ -59,6 +59,37 @@ class FormattingTests(unittest.TestCase):
         self.assertEqual(package["progress"], 100)
         self.assertEqual(package["speed_text"], "0 B/s")
 
+    def test_number_treats_nonfinite_floats_as_zero(self):
+        """Regression test for issue #78.
+
+        ``int(float("inf"))`` raises ``OverflowError``; ``int(float("nan"))``
+        raises ``ValueError``. The MyJDownloader API can return either for
+        unrestrained speeds, and a single bad value must not abort the
+        snapshot-processing pipeline.
+        """
+        self.assertEqual(jdctl.number(float("inf")), 0)
+        self.assertEqual(jdctl.number(float("-inf")), 0)
+        self.assertEqual(jdctl.number(float("nan")), 0)
+        # string forms are also reachable through the JSON-encoded response
+        self.assertEqual(jdctl.number("Infinity"), 0)
+        self.assertEqual(jdctl.number("-Infinity"), 0)
+        self.assertEqual(jdctl.number("NaN"), 0)
+        # regular values continue to flow through unchanged
+        self.assertEqual(jdctl.number(50), 50)
+        self.assertEqual(jdctl.number("50"), 50)
+        self.assertEqual(jdctl.number(2**100), 2**63 - 1)
+        self.assertEqual(jdctl.number(-(2**100)), -(2**63))
+
+    def test_normalize_package_survives_nonfinite_speed(self):
+        package = jdctl.normalize_package(
+            {"uuid": "ok", "speed": float("inf"), "bytesLoaded": 0, "bytesTotal": 0},
+            "download",
+        )
+        # The snapshot must still be returned with a sane, non-crashing
+        # derived value.
+        self.assertEqual(package["speed"], 0)
+        self.assertEqual(package["speed_text"], "0 B/s")
+
 
 class CredentialTests(unittest.TestCase):
     @mock.patch("jdctl.run_bounded_subprocess")

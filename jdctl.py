@@ -547,10 +547,27 @@ def validate_request(request: dict[str, Any]) -> None:
 
 
 def number(value: Any) -> int:
-    try:
-        return max(-(2**63), min(2**63 - 1, int(value or 0)))
-    except (TypeError, ValueError):
+    """Coerce a remote numeric into a bounded integer, treating bad input as 0.
+
+    NaN, +/-inf, and the like can show up in malformed remote responses
+    (the API occasionally reports ``Infinity`` for unrestrained speeds).
+    We treat every non-finite or out-of-range numeric as 0 so the snapshot
+    processing pipeline never aborts on a single bad value.
+    """
+    if value is None or value == "":
         return 0
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        # Coerce bools (already coerced above by int(True)==1) and floats
+        # that may have lost precision on the way to JSON.
+        try:
+            converted = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    except OverflowError:
+        return 0
+    return max(-(2**63), min(2**63 - 1, converted))
 
 
 def human_bytes(value: int, suffix: str = "") -> str:
