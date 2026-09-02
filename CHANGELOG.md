@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.2] - 2026-09-02
 
 - Preserve outer absolute deadlines when nested deadlines are longer, and
   restore any outer's already-elapsed deadline on exit
@@ -28,6 +28,8 @@ All notable changes to this project will be documented in this file.
   recoverable: a second start() is a no-op while a listener is
   already running, and a bind failure on a cold start records the
   error without leaving a stale handle
+
+## [Unreleased]
 
 ## [0.6.1] - 2026-09-02
 

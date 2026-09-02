@@ -327,10 +327,10 @@ class BrowserPackagingTests(unittest.TestCase):
 
 class ReleaseMetadataTests(unittest.TestCase):
     def test_release_versions_and_changelog_match(self):
-        self.assertEqual(verify_release.verify(), "0.6.1")
+        self.assertEqual(verify_release.verify(), "0.6.2")
 
     def test_release_tag_must_match_version(self):
-        self.assertEqual(verify_release.verify("v0.6.1"), "0.6.1")
+        self.assertEqual(verify_release.verify("v0.6.2"), "0.6.2")
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             verify_release.verify("v9.9.9")
 
