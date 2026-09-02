@@ -154,64 +154,136 @@
   };
 
   const NativeXHR = window.XMLHttpRequest;
+  const OMAJ_STATE_UNSENT = 0;
+  const OMAJ_STATE_OPENED = 1;
+  const OMAJ_STATE_HEADERS = 2;
+  const OMAJ_STATE_LOADING = 3;
+  const OMAJ_STATE_DONE = 4;
   class OmaJDownLoadXHR extends NativeXHR {
-    open(method, url, ...rest) {
-      this.__omajRoute = cnlRoute(url, method);
-      if (!this.__omajRoute) return super.open(method, url, ...rest);
-      this.__omajReadyState = 1;
+    constructor() {
+      super();
+      this.__omajRoute = null;
+      this.__omajReadyState = OMAJ_STATE_UNSENT;
       this.__omajStatus = 0;
       this.__omajResponseText = "";
       this.__omajAborted = false;
       this.__omajFinished = false;
+      this.__omajController = null;
+      this.__omajToken = 0;
+      this.__omajOpenGeneration = 0;
+    }
+    open(method, url, ...rest) {
+      this.__omajRoute = cnlRoute(url, method);
+      if (!this.__omajRoute) return super.open(method, url, ...rest);
+      // When a request was already in flight, mirror the native XHR
+      // behaviour of abandoning it before parsing the new request.
+      // Stale callbacks must not be allowed to update the replacement
+      // XHR's state.
+      const hadInflight = this.__omajController && !this.__omajFinished;
+      if (hadInflight) {
+        this.__omajAborted = true;
+        this.__omajFinished = true;
+        try {
+          this.__omajController.abort();
+        } catch (_) { /* controller may already be settled */ }
+      }
+      // Bump the generation so any in-flight callback from a previous
+      // open() can detect that it no longer owns this XHR.
+      this.__omajOpenGeneration += 1;
+      this.__omajGeneration = this.__omajOpenGeneration;
+      this.__omajReadyState = OMAJ_STATE_OPENED;
+      this.__omajStatus = 0;
+      this.__omajResponseText = "";
+      this.__omajAborted = false;
+      this.__omajFinished = false;
+      this.__omajController = null;
       this.dispatchEvent(new Event("readystatechange"));
+      if (hadInflight) {
+        this.__omajReadyState = OMAJ_STATE_DONE;
+        this.dispatchEvent(new Event("readystatechange"));
+        this.dispatchEvent(new ProgressEvent("abort"));
+        this.dispatchEvent(new ProgressEvent("loadend"));
+      }
     }
     setRequestHeader(name, value) {
       if (!this.__omajRoute) return super.setRequestHeader(name, value);
     }
     send(body) {
       if (!this.__omajRoute) return super.send(body);
+      // Native XHRs reject send() while a request is active to avoid
+      // duplicate in-flight forwards duplicating Click'n'Load inbox
+      // entries. Replicate that here.
+      if (this.__omajController && !this.__omajFinished) {
+        throw new Error("Failed to execute 'send' on XMLHttpRequest: The object is in an invalid state.");
+      }
       this.__omajController = new AbortController();
       this.__omajAborted = false;
       this.__omajFinished = false;
+      this.__omajGeneration = this.__omajOpenGeneration;
+      this.__omajToken += 1;
+      const myToken = this.__omajToken;
+      const myGeneration = this.__omajGeneration;
+      const isStale = () => this.__omajGeneration !== myGeneration || this.__omajToken !== myToken;
+      const finalize = (eventName) => {
+        if (isStale()) return; // open() or send() replaced us
+        if (this.__omajFinished) return;
+        this.__omajFinished = true;
+        this.__omajController = null;
+        // Native XHRs leave readyState at UNSENT (0) after an abort and
+        // move it to DONE (4) after any other terminal event. Only emit
+        // the final readystatechange if the state actually changes.
+        const desiredReadyState = eventName === "abort" ? OMAJ_STATE_UNSENT : OMAJ_STATE_DONE;
+        if (this.__omajReadyState !== desiredReadyState) {
+          this.__omajReadyState = desiredReadyState;
+          this.dispatchEvent(new Event("readystatechange"));
+        }
+        this.dispatchEvent(new ProgressEvent(eventName || "loadend"));
+        this.dispatchEvent(new ProgressEvent("loadend"));
+      };
       let timedOut = false;
       let timeout;
       if (this.timeout > 0) {
         timeout = setTimeout(() => {
           timedOut = true;
-          this.__omajController.abort();
+          try {
+            this.__omajController.abort();
+          } catch (_) { /* ignore */ }
         }, this.timeout);
       }
       this.dispatchEvent(new ProgressEvent("loadstart"));
       forward(this.__omajRoute, body, { signal: this.__omajController.signal, timeoutMs: 0 }).then(result => {
         if (timeout) clearTimeout(timeout);
+        if (isStale()) return;
         if (this.__omajFinished) return;
-        this.__omajReadyState = 2;
-        this.dispatchEvent(new Event("readystatechange"));
-        this.__omajReadyState = 3;
-        this.dispatchEvent(new Event("readystatechange"));
+        if (this.__omajReadyState !== OMAJ_STATE_HEADERS) {
+          this.__omajReadyState = OMAJ_STATE_HEADERS;
+          this.dispatchEvent(new Event("readystatechange"));
+        }
+        if (this.__omajReadyState !== OMAJ_STATE_LOADING) {
+          this.__omajReadyState = OMAJ_STATE_LOADING;
+          this.dispatchEvent(new Event("readystatechange"));
+        }
         this.__omajStatus = result.status || 200;
         this.__omajResponseText = result.body || "success\r\n";
-        this.__omajReadyState = 4;
         this.__omajFinished = true;
+        this.__omajController = null;
+        this.__omajReadyState = OMAJ_STATE_DONE;
         this.dispatchEvent(new Event("readystatechange"));
         this.dispatchEvent(new ProgressEvent("load"));
         this.dispatchEvent(new ProgressEvent("loadend"));
       }).catch(() => {
         if (timeout) clearTimeout(timeout);
-        if (this.__omajFinished) return;
-        this.__omajStatus = 0;
-        this.__omajReadyState = this.__omajAborted ? 0 : 4;
-        this.__omajFinished = true;
-        this.dispatchEvent(new Event("readystatechange"));
-        this.dispatchEvent(new ProgressEvent(timedOut ? "timeout" : (this.__omajAborted ? "abort" : "error")));
-        this.dispatchEvent(new ProgressEvent("loadend"));
+        if (isStale()) return;
+        finalize(timedOut ? "timeout" : (this.__omajAborted ? "abort" : "error"));
       });
     }
     abort() {
       if (!this.__omajRoute) return super.abort();
       if (!this.__omajController || this.__omajFinished) return;
       this.__omajAborted = true;
-      this.__omajController.abort();
+      try {
+        this.__omajController.abort();
+      } catch (_) { /* ignore */ }
     }
     get readyState() { return this.__omajRoute ? (this.__omajReadyState || 0) : super.readyState; }
     get status() { return this.__omajRoute ? (this.__omajStatus || 0) : super.status; }

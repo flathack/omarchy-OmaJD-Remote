@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
   the Add Links editor so a paste cannot overrun the IPC line limit
 - Persist uncertain manual Add Links submissions so the duplicate-risk
   warning and retry token survive a helper restart
+- Enforce native-style XHR reentrancy: a second ``send()`` throws
+  ``InvalidStateError``, a second ``open()`` aborts the in-flight
+  request and cancels the stale callback, and a token/generation
+  pair keeps replacement XHRs from being touched by their predecessors
 
 ## [0.6.1] - 2026-09-02
 

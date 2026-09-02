@@ -328,6 +328,48 @@ test("XHR uses its own timeout without the bridge watchdog", async () => {
   assert.deepEqual(harness.timerDelays, []);
 });
 
+test("XHR rejects send() while a request is still in flight", async () => {
+  const harness = pageHarness();
+  await new Promise(resolve => queueMicrotask(resolve));
+  const xhr = new harness.window.XMLHttpRequest();
+  xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  xhr.send("urls=first");
+  let threw = null;
+  try { xhr.send("urls=second"); } catch (error) { threw = error; }
+  assert.ok(threw, "second send() must throw while the previous request is still active");
+  assert.match(String(threw && threw.message || ""), /invalid state/i);
+});
+
+test("XHR second open() rejects a stale in-flight callback", async () => {
+  const harness = pageHarness();
+  // The page bridge probes the listener availability on load; wait for
+  // that single captured row so this test only inspects the forwards
+  // triggered by the XHR it constructs.
+  await new Promise(resolve => queueMicrotask(resolve));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const xhr = new harness.window.XMLHttpRequest();
+  xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  xhr.send("urls=first");
+  // Exactly one additional captured row must be the XHR's own forward.
+  const baseline = harness.captured.length;
+  // Replace the request before the first response resolves. The second
+  // open() must ask the bridge to cancel the in-flight forward.
+  xhr.open("POST", "http://127.0.0.1:9666/flash/add");
+  xhr.send("urls=second");
+  await new Promise(resolve => queueMicrotask(resolve));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const tail = harness.captured.slice(baseline - 1);
+  const types = tail.map(row => row.type);
+  assert.deepEqual(
+    types,
+    ["request", "cancel", "request"],
+    "stale first forward must be cancelled, replacement must be forwarded once",
+  );
+  assert.equal(xhr.readyState, 4);
+  assert.equal(xhr.status, 200);
+});
+
 test("service worker authenticates provenance and supports GET probes", async () => {
   let listener;
   const calls = [];
