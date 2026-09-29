@@ -24,6 +24,9 @@ trap cleanup EXIT
 mkdir -p "$qml_import_root/Plugin"
 cp "$project_dir/tests/qml-smoke.qml" "$qml_import_root/shell.qml"
 cp "$project_dir/BarWidget.qml" "$project_dir/Service.qml" "$project_dir/DownloadMark.qml" "$qml_import_root/Plugin/"
+printf '#!/usr/bin/env bash\nsleep 1\n' >"$qml_import_root/Plugin/launcher.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$qml_import_root/Plugin/install.sh"
+chmod 700 "$qml_import_root/Plugin/launcher.sh" "$qml_import_root/Plugin/install.sh"
 ln -s "$omarchy_shell/Commons" "$qml_import_root/Commons"
 ln -s "$omarchy_shell/Ui" "$qml_import_root/Ui"
 

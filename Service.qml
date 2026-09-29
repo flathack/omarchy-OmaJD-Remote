@@ -77,8 +77,14 @@ Item {
 
     readonly property bool paused: controllerState.toUpperCase().indexOf("PAUSE") !== -1
     readonly property bool running: connected && (activeDownloads > 0 || controllerState.toUpperCase().indexOf("RUN") !== -1)
-    readonly property string helperPath: manifest && manifest.__sourceDir ? String(manifest.__sourceDir).replace(/\/$/, "") + "/launcher.sh" : ""
-    readonly property string installerPath: manifest && manifest.__sourceDir ? String(manifest.__sourceDir).replace(/\/$/, "") + "/install.sh" : ""
+    // Omarchy strips __sourceDir from third-party manifests before handing
+    // them to services. Resolve bundled scripts relative to this QML file.
+    function localPluginPath(name) {
+        var url = String(Qt.resolvedUrl(name));
+        return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : "";
+    }
+    readonly property string helperPath: localPluginPath("launcher.sh")
+    readonly property string installerPath: localPluginPath("install.sh")
 
     function send(message) {
         if (!daemon.running) {
