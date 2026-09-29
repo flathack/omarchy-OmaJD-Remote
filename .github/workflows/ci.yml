@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Select immutable Arch package snapshot
         run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
-      - run: pacman -Syu --noconfirm diffutils git nodejs python python-pip qt6-declarative shellcheck unzip zip
+      - run: pacman -Syu --noconfirm --disable-download-timeout diffutils git nodejs python python-pip qt6-declarative shellcheck unzip zip
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python -m venv /tmp/omajdownload-ci
       - run: /tmp/omajdownload-ci/bin/pip install --disable-pip-version-check --require-hashes -r requirements.lock
@@ -28,7 +28,7 @@ jobs:
       - name: Select immutable Arch package snapshot
         run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - name: Install current Omarchy QML toolchain
-        run: pacman -Syu --noconfirm git qt6-declarative quickshell weston
+        run: pacman -Syu --noconfirm --disable-download-timeout git qt6-declarative quickshell weston
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Fetch matching Omarchy Quattro types
         run: |
@@ -61,15 +61,15 @@ jobs:
       # Pinned browser/WebDriver versions for the 2026/09/01 snapshot so the
       # released extension attestations are reproducible from the reviewed
       # source.
-      CHROMIUM_VERSION: 151.0.7922.173-1
-      FIREFOX_VERSION: 154.0-1
+      CHROMIUM_VERSION: 152.0.7977.64-1
+      FIREFOX_VERSION: 154.0.1-1
       GECKODRIVER_VERSION: 0.37.1-1
     steps:
       - name: Select immutable Arch package snapshot
         run: sed -i 's|^Server = .*|Server = https://archive.archlinux.org/repos/2026/09/01/$repo/os/$arch|' /etc/pacman.d/mirrorlist
       - name: Install stable browsers and WebDriver
         run: >-
-          pacman -Syu --noconfirm
+          pacman -Syu --noconfirm --disable-download-timeout
           chromium=${CHROMIUM_VERSION}
           firefox=${FIREFOX_VERSION}
           geckodriver=${GECKODRIVER_VERSION}
