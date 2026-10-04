@@ -1,4 +1,4 @@
-myjdapi==1.1.10
+myjdapi==1.1.11
 requests==2.34.2
 pycryptodome==3.23.0
 charset-normalizer==3.5.1
